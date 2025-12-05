@@ -475,58 +475,58 @@ LEFT JOIN weather_events_cdc we
 -- =========================================================
 
 -- intermediate tables: get latest records (in event_time column) of unit_status_updates by ROW_NUMBER
--- WITH latest_unit_status AS (
---     SELECT
---         unit_id,
---         region_id,
---         lat,
---         lon,
---         health_percent,
---         event_time,
---         ROW_NUMBER() OVER (PARTITION BY unit_id ORDER BY event_time DESC) AS rn
---     FROM unit_status_updates_cdc
--- )
--- , filtered_latest_us AS (
---     SELECT unit_id, region_id, lat, lon, health_percent, event_time
---     FROM latest_unit_status
---     WHERE rn = 1
--- )
+ WITH latest_unit_status AS (
+     SELECT
+         unit_id,
+         region_id,
+         lat,
+         lon,
+         health_percent,
+         event_time,
+         ROW_NUMBER() OVER (PARTITION BY unit_id ORDER BY event_time DESC) AS rn
+     FROM unit_status_updates_cdc
+ )
+ , filtered_latest_us AS (
+     SELECT unit_id, region_id, lat, lon, health_percent, event_time
+     FROM latest_unit_status
+     WHERE rn = 1
+ )
 
--- INSERT INTO gold_threat_assessment
--- SELECT
---     t.id AS target_id,
---     d.region_id,
---     t.iff_status,
---     d.confidence
---         * (1 - 0.3 * COALESCE(we.intensity, 0)
---             * (CASE WHEN we.type IN ('fog','storm') THEN 1 ELSE 0 END)
---             - 0.5 * (CASE WHEN ce.effect = 'jammed' THEN 1 ELSE 0 END)) AS adjusted_confidence,
---     CASE
---         WHEN (d.speed_kmh > 500 OR t.iff_status = 'foe')
---              AND (d.confidence
---                   * (1 - 0.3 * COALESCE(we.intensity, 0)
---                       * (CASE WHEN we.type IN ('fog','storm') THEN 1 ELSE 0 END)
---                       - 0.5 * (CASE WHEN ce.effect = 'jammed' THEN 1 ELSE 0 END))) > 0.8
---         THEN 'high'
---         ELSE 'medium'
---     END AS predicted_threat,
---     COALESCE(haversine(fl.lat, fl.lon, d.lat, d.lon), 1e9) AS distance_km,
---     CASE
---         WHEN d.speed_kmh > 0
---         THEN COALESCE(haversine(fl.lat, fl.lon, d.lat, d.lon), 1e9) / d.speed_kmh * 3600
---         ELSE 1e9
---     END AS response_time_sec,
---     d.event_time
--- FROM targets_cdc t
--- JOIN detections_cdc d ON d.target_id = t.id
--- LEFT JOIN sensors_cdc s ON s.id = d.sensor_id
--- LEFT JOIN units_cdc u ON u.id = s.unit_id
--- LEFT JOIN filtered_latest_us fl ON fl.unit_id = u.id
--- LEFT JOIN weather_events_cdc we
---     ON we.region_id = d.region_id AND we.event_time <= d.event_time
--- LEFT JOIN cyber_ew_events_cdc ce
---     ON ce.target_sensor_id = d.sensor_id AND ce.event_time <= d.event_time
--- ;
+ INSERT INTO gold_threat_assessment
+ SELECT
+     t.id AS target_id,
+     d.region_id,
+     t.iff_status,
+     d.confidence
+         * (1 - 0.3 * COALESCE(we.intensity, 0)
+             * (CASE WHEN we.type IN ('fog','storm') THEN 1 ELSE 0 END)
+             - 0.5 * (CASE WHEN ce.effect = 'jammed' THEN 1 ELSE 0 END)) AS adjusted_confidence,
+     CASE
+         WHEN (d.speed_kmh > 500 OR t.iff_status = 'foe')
+              AND (d.confidence
+                   * (1 - 0.3 * COALESCE(we.intensity, 0)
+                       * (CASE WHEN we.type IN ('fog','storm') THEN 1 ELSE 0 END)
+                       - 0.5 * (CASE WHEN ce.effect = 'jammed' THEN 1 ELSE 0 END))) > 0.8
+         THEN 'high'
+         ELSE 'medium'
+     END AS predicted_threat,
+     COALESCE(haversine(fl.lat, fl.lon, d.lat, d.lon), 1e9) AS distance_km,
+     CASE
+         WHEN d.speed_kmh > 0
+         THEN COALESCE(haversine(fl.lat, fl.lon, d.lat, d.lon), 1e9) / d.speed_kmh * 3600
+         ELSE 1e9
+     END AS response_time_sec,
+     d.event_time
+ FROM targets_cdc t
+ JOIN detections_cdc d ON d.target_id = t.id
+ LEFT JOIN sensors_cdc s ON s.id = d.sensor_id
+ LEFT JOIN units_cdc u ON u.id = s.unit_id
+ LEFT JOIN filtered_latest_us fl ON fl.unit_id = u.id
+ LEFT JOIN weather_events_cdc we
+     ON we.region_id = d.region_id AND we.event_time <= d.event_time
+ LEFT JOIN cyber_ew_events_cdc ce
+     ON ce.target_sensor_id = d.sensor_id AND ce.event_time <= d.event_time
+ ;
 
 -- =========================================================
 -- 3. Alerts with Commands (upsert)

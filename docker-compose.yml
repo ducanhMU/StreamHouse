@@ -149,7 +149,7 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-    ports:
+    ports: 
       - "8080:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
@@ -178,6 +178,67 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - jadc2
+
+  spark-master:
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    container_name: spark-master
+    hostname: spark-master
+    depends_on:
+      - minio
+      - hms
+    ports:
+      - "7077:7077"
+      - "8082:8080" # avoid conflict port
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=spark-master       # broadcast cho client thấy
+      - SPARK_MASTER_PORT=7077
+      - SPARK_RPC_AUTHENTICATION_ENABLED=yes
+      - SPARK_RPC_AUTHENTICATION_SECRET=my-secret
+      # Hadoop S3A (data plane)
+      - fs.s3a.endpoint=http://minio:9000
+      - fs.s3a.path.style.access=true
+      - fs.s3a.access.key=admin
+      - fs.s3a.secret.key=password
+      - fs.s3a.connection.ssl.enabled=false
+    volumes:
+      - ./jobs:/opt/bitnami/spark/jobs:ro
+      - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
+    networks:
+      - jadc2
+
+  spark-worker:  
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    container_name: spark-worker
+    hostname: spark-worker
+    depends_on:
+      - spark-master
+    ports:
+      - "8084:8081" # avoid conflict port
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=1g
+      - SPARK_WORKER_HOSTNAME=spark-worker
+      # Thêm các dòng sau cho xác thực RPC
+      - SPARK_RPC_AUTHENTICATION_ENABLED=yes
+      - SPARK_RPC_AUTHENTICATION_SECRET=my-secret
+      # Hadoop S3A (data plane)
+      - fs.s3a.endpoint=http://minio:9000
+      - fs.s3a.path.style.access=true
+      - fs.s3a.access.key=admin
+      - fs.s3a.secret.key=password
+      - fs.s3a.connection.ssl.enabled=false
+    volumes:
+      - ./jobs:/opt/bitnami/spark/jobs:ro
+      - ./flink/conf/hive-site.xml:/opt/flink/conf/hive-site.xml:ro
     networks:
       - jadc2
 
@@ -478,67 +539,6 @@ services:
       retries: 5
     networks:
       - jadc2
-
-  # clickhouse:
-  #   image: clickhouse/clickhouse-server:latest
-  #   container_name: jadc2-clickhouse
-  #   ports:
-  #     - "8123:8123" # http interface
-  #     - "9002:9000" # native client interface
-  #   environment:
-  #     CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
-  #     CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-password}
-  #   volumes:
-  #     - clickhouse_data:/var/lib/clickhouse
-  #     - ./clickhouse/create_clickhouse_table.sql:/docker-entrypoint-initdb.d/create_clickhouse_table.sql:ro # ...?
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "curl -f http://localhost:8123 || exit 1"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
-  #   networks:
-  #     - jadc2_network
-
-  # dremio:
-  #   platform: linux/x86_64
-  #   image: dremio/dremio-oss:25.2
-  #   container_name: jadc2-dremio
-  #   ports:
-  #     - "9047:9047"
-  #     - "31010:31010"
-  #     - "32010:32010"
-  #   environment:
-  #     DREMIO_JAVA_SERVER_EXTRA_OPTS: -Dpaths.dist=file:///opt/dremio/data/dist
-  #     MINIO_ENDPOINT: http://minio:9000
-  #     MINIO_ACCESS_KEY: admin
-  #     MINIO_SECRET_KEY: password
-  #   volumes:
-  #     - dremio_data:/opt/dremio/data
-  #     - dremio_conf:/opt/dremio/conf
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "curl -f http://localhost:9047 || exit 1"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
-  #   networks:
-  #     - jadc2_network
-
-  # dbt:
-  #     image: python:3.9-slim
-  #     container_name: jadc2-dbt
-  #     working_dir: /workspace
-  #     volumes:
-  #       - ./dbt:/workspace:ro
-  #     entrypoint: ["/bin/bash", "-c"]
-  #     command: >
-  #       "pip install dbt-core dbt-postgres || true;
-  #       echo 'dbt container ready. Run: docker exec -it jadc2-dbt dbt run' ;
-  #       tail -f /dev/null"
-  #     depends_on:
-  #       - dremio
-  #       - minio
-  #     networks:
-  #       - jadc2_network
 
   # airflow-db:
   #     image: postgres:14
