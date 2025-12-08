@@ -44,3 +44,15 @@ docker-compose up --build
 - Use Docker secrets for sensitive credentials (e.g., `DB_PASSWORD`).
 - See each folder's `README.md` for service-specific details.
 - Refer to `./medallion_DB_design.md` for Bronze, Silver, Gold layer design.
+
+```mermaid
+graph LR
+    S_DB[(Postgres Source)] -->|Debezium Kafka Connect| K(Kafka Topic)
+    K -->|Spark Stream Agent| H(HDFS/Delta Lake)
+    H -->|Spark Batch Agent| D_DB[(Postgres Dest)]
+
+    style S_DB fill:#f9f,stroke:#333
+    style K fill:#ff9,stroke:#333
+    style H fill:#9ff,stroke:#333
+    style D_DB fill:#9f9,stroke:#333
+```

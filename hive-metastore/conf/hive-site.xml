@@ -1,75 +1,418 @@
-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
-<!-- These are default values meant to allow easy smoke testing of the metastore.  You will
-likely need to add a number of new values. -->
+<!--
+  hive-metastore/conf/hive-site.xml
+  Standalone Hive Metastore Service Configuration
+  
+  This HMS runs as a dedicated service to provide centralized metadata
+  management for Spark, Presto, and other query engines.
+-->
 <configuration>
-  <property>
-    <name>metastore.thrift.uris</name>
-    <value>thrift://hms.jadc2:9083</value>
-  </property>
-  <!-- Add Materialization stuff for standalone metastore -->
-  <property>
-    <name>metastore.task.threads.always</name>
-    <value>org.apache.hadoop.hive.metastore.events.EventCleanerTask</value>
-  </property>
-  <property>
-    <name>metastore.expression.proxy</name>
-    <value>org.apache.hadoop.hive.metastore.DefaultPartitionExpressionProxy</value>
-  </property>
+    <!-- ==========================================
+         METASTORE SERVICE CONFIGURATION
+         ========================================== -->
+    
+    <!-- Metastore Service Mode -->
+    <property>
+        <name>hive.metastore.uris</name>
+        <value/>
+        <description>
+            Empty value indicates this IS the metastore service.
+            Clients will specify: thrift://hive-metastore:9083
+        </description>
+    </property>
+    
+    <property>
+        <name>hive.metastore.port</name>
+        <value>9083</value>
+        <description>Thrift metastore service port</description>
+    </property>
 
-  <!-- postgresql is backend db for hms -->
-  <property>
-    <name>javax.jdo.option.ConnectionURL</name>
-    <value>jdbc:postgresql://hms-db:5432/hms</value>
-  </property>
-  <property>
-    <name>javax.jdo.option.ConnectionDriverName</name>
-    <value>org.postgresql.Driver</value>
-  </property>
-  <property>
-    <name>javax.jdo.option.ConnectionUserName</name>
-    <value>hive</value>
-  </property>
-  <property>
-    <name>javax.jdo.option.ConnectionPassword</name>
-    <value>hive</value>
-  </property>
+    <!-- ==========================================
+         DATABASE BACKEND (PostgreSQL)
+         ========================================== -->
+    
+    <property>
+        <name>javax.jdo.option.ConnectionURL</name>
+        <value>jdbc:postgresql://hms-db:5432/metastore</value>
+        <description>
+            PostgreSQL database for storing Hive metadata.
+            Better than Derby for production use.
+        </description>
+    </property>
 
-   <!-- Warehouse (point to s3a path) -->
-  <property>
-    <name>hive.metastore.warehouse.dir</name>
-    <value>s3a://warehouse/</value>
-  </property>
+    <property>
+        <name>javax.jdo.option.ConnectionDriverName</name>
+        <value>org.postgresql.Driver</value>
+        <description>PostgreSQL JDBC driver</description>
+    </property>
 
-  <!-- Derby embedded DB-->
-  <!-- <property>
-    <name>javax.jdo.option.ConnectionURL</name>
-    <value>jdbc:derby:;databaseName=/tmp/metastore_db;create=true</value>
-  </property>
-  <property>
-    <name>javax.jdo.option.ConnectionDriverName</name>
-    <value>org.apache.derby.jdbc.EmbeddedDriver</value>
-  </property> -->
+    <property>
+        <name>javax.jdo.option.ConnectionUserName</name>
+        <value>hive</value>
+        <description>Database username</description>
+    </property>
 
-  <!-- minIO config -->
-  <property>
-      <name>fs.s3a.access.key</name>
-      <value>admin</value>
-  </property>
+    <property>
+        <name>javax.jdo.option.ConnectionPassword</name>
+        <value>hive</value>
+        <description>Database password</description>
+    </property>
 
-  <property>
-      <name>fs.s3a.secret.key</name>
-      <value>password</value>
-  </property>
+    <!-- ==========================================
+         WAREHOUSE DIRECTORY (HDFS)
+         ========================================== -->
+    
+    <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>hdfs://namenode:9000/user/hive/warehouse</value>
+        <description>
+            Default location for managed tables in HDFS.
+            External tables can be anywhere.
+        </description>
+    </property>
 
-  <property>
-      <name>fs.s3a.endpoint</name>
-      <value>http://minio:9000</value>
-  </property>
+    <property>
+        <name>hive.metastore.warehouse.external.dir</name>
+        <value>hdfs://namenode:9000/user/hive/warehouse/external</value>
+        <description>Default location for external tables</description>
+    </property>
 
-  <property>
-      <name>fs.s3a.path.style.access</name>
-      <value>true</value>
-  </property>
+    <!-- ==========================================
+         SCHEMA MANAGEMENT
+         ========================================== -->
+    
+    <property>
+        <name>hive.metastore.schema.verification</name>
+        <value>false</value>
+        <description>
+            Disable strict schema version checking.
+            Set to 'true' in production after initial setup.
+        </description>
+    </property>
 
+    <property>
+        <name>hive.metastore.schema.verification.record.version</name>
+        <value>false</value>
+        <description>Record schema version in the metastore database</description>
+    </property>
+
+    <property>
+        <name>datanucleus.schema.autoCreateAll</name>
+        <value>true</value>
+        <description>
+            Auto-create metastore schema tables on first run.
+            Disable in production after initial setup.
+        </description>
+    </property>
+
+    <property>
+        <name>datanucleus.fixedDatastore</name>
+        <value>false</value>
+        <description>Allow schema modifications</description>
+    </property>
+
+    <property>
+        <name>datanucleus.autoCreateSchema</name>
+        <value>true</value>
+        <description>Auto-create schema if it doesn't exist</description>
+    </property>
+
+    <property>
+        <name>datanucleus.autoCreateTables</name>
+        <value>true</value>
+        <description>Auto-create tables if they don't exist</description>
+    </property>
+
+    <property>
+        <name>datanucleus.autoCreateColumns</name>
+        <value>true</value>
+        <description>Auto-create columns if they don't exist</description>
+    </property>
+
+    <!-- ==========================================
+         HADOOP/HDFS CONFIGURATION
+         ========================================== -->
+    
+    <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://namenode:9000</value>
+        <description>Default Hadoop filesystem</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>hdfs://namenode:9000/user/hive/warehouse</value>
+        <description>Hive warehouse location in HDFS</description>
+    </property>
+
+    <!-- ==========================================
+         PERFORMANCE TUNING
+         ========================================== -->
+    
+    <!-- Connection Pool Settings -->
+    <property>
+        <name>datanucleus.connectionPoolingType</name>
+        <value>HikariCP</value>
+        <description>Use HikariCP for better connection pooling performance</description>
+    </property>
+
+    <property>
+        <name>datanucleus.connectionPool.maxPoolSize</name>
+        <value>20</value>
+        <description>Maximum number of database connections in the pool</description>
+    </property>
+
+    <property>
+        <name>datanucleus.connectionPool.minPoolSize</name>
+        <value>5</value>
+        <description>Minimum number of database connections in the pool</description>
+    </property>
+
+    <!-- Metastore Client Timeout -->
+    <property>
+        <name>hive.metastore.client.connect.retry.delay</name>
+        <value>5</value>
+        <description>Delay in seconds between metastore connection retries</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.client.socket.timeout</name>
+        <value>600</value>
+        <description>Metastore client socket timeout in seconds</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.connect.retries</name>
+        <value>5</value>
+        <description>Number of retries on metastore connection failures</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.failure.retries</name>
+        <value>3</value>
+        <description>Number of retries on metastore operation failures</description>
+    </property>
+
+    <!-- Thrift Server Settings -->
+    <property>
+        <name>hive.metastore.server.min.threads</name>
+        <value>20</value>
+        <description>Minimum number of Thrift server worker threads</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.server.max.threads</name>
+        <value>100</value>
+        <description>Maximum number of Thrift server worker threads</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.thrift.max.message.size</name>
+        <value>1073741824</value>
+        <description>Maximum Thrift message size (1GB)</description>
+    </property>
+
+    <!-- ==========================================
+         STATISTICS & METADATA CACHING
+         ========================================== -->
+    
+    <property>
+        <name>hive.metastore.stats.autogather</name>
+        <value>true</value>
+        <description>Automatically gather table statistics</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.cache.ttl</name>
+        <value>600</value>
+        <description>Time-to-live for metastore cache in seconds (10 minutes)</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.cache.pinobjtypes</name>
+        <value>Table,Database,Type,FieldSchema,Order</value>
+        <description>Objects to keep pinned in the cache</description>
+    </property>
+
+    <!-- ==========================================
+         DELTA LAKE COMPATIBILITY
+         ========================================== -->
+    
+    <property>
+        <name>hive.metastore.disallow.incompatible.col.type.changes</name>
+        <value>false</value>
+        <description>
+            Allow column type changes for Delta Lake schema evolution.
+            Delta Lake manages its own schema evolution.
+        </description>
+    </property>
+
+    <property>
+        <name>hive.metastore.try.direct.sql</name>
+        <value>true</value>
+        <description>Use direct SQL queries for better performance</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.try.direct.sql.ddl</name>
+        <value>true</value>
+        <description>Use direct SQL for DDL operations</description>
+    </property>
+
+    <!-- ==========================================
+         SECURITY CONFIGURATION
+         ========================================== -->
+    
+    <property>
+        <name>hive.metastore.pre.event.listeners</name>
+        <value></value>
+        <description>
+            Comma-separated list of pre-event listener classes.
+            Empty for now, can be used for audit logging.
+        </description>
+    </property>
+
+    <property>
+        <name>hive.metastore.event.listeners</name>
+        <value></value>
+        <description>
+            Comma-separated list of event listener classes.
+            Can be used for notifications to external systems.
+        </description>
+    </property>
+
+    <property>
+        <name>hive.security.authorization.enabled</name>
+        <value>false</value>
+        <description>
+            Disable authorization for development.
+            Enable in production with proper ACLs.
+        </description>
+    </property>
+
+    <property>
+        <name>hive.metastore.authorization.storage.checks</name>
+        <value>false</value>
+        <description>Disable storage-based authorization checks</description>
+    </property>
+
+    <!-- ==========================================
+         LOGGING & MONITORING
+         ========================================== -->
+    
+    <property>
+        <name>hive.metastore.metrics.enabled</name>
+        <value>true</value>
+        <description>Enable metastore metrics collection</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.event.db.notification.api.auth</name>
+        <value>false</value>
+        <description>Disable authentication for event notifications</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.event.db.listener.timetolive</name>
+        <value>86400</value>
+        <description>Time-to-live for event log entries (24 hours)</description>
+    </property>
+
+    <!-- ==========================================
+         TRANSACTION SUPPORT
+         ========================================== -->
+    
+    <property>
+        <name>hive.support.concurrency</name>
+        <value>true</value>
+        <description>Enable concurrency support for ACID operations</description>
+    </property>
+
+    <property>
+        <name>hive.txn.manager</name>
+        <value>org.apache.hadoop.hive.ql.lockmgr.DbTxnManager</value>
+        <description>Transaction manager for ACID tables</description>
+    </property>
+
+    <property>
+        <name>hive.compactor.initiator.on</name>
+        <value>true</value>
+        <description>Enable compactor initiator thread</description>
+    </property>
+
+    <property>
+        <name>hive.compactor.worker.threads</name>
+        <value>2</value>
+        <description>Number of compactor worker threads</description>
+    </property>
+
+    <!-- ==========================================
+         JADC2-SPECIFIC SETTINGS
+         ========================================== -->
+    
+    <property>
+        <name>hive.metastore.rawstore.impl</name>
+        <value>org.apache.hadoop.hive.metastore.ObjectStore</value>
+        <description>Raw store implementation for metastore</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.server.max.message.size</name>
+        <value>1073741824</value>
+        <description>
+            Maximum message size for large JADC2 schemas (1GB).
+            Important for tables with many columns.
+        </description>
+    </property>
+
+    <!-- ==========================================
+         DATANUCLEUS CONFIGURATION
+         ========================================== -->
+    
+    <property>
+        <name>datanucleus.autoStartMechanismMode</name>
+        <value>checked</value>
+        <description>Auto-start mechanism mode for DataNucleus</description>
+    </property>
+
+    <property>
+        <name>datanucleus.transactionIsolation</name>
+        <value>read-committed</value>
+        <description>Transaction isolation level</description>
+    </property>
+
+    <property>
+        <name>datanucleus.validateTables</name>
+        <value>false</value>
+        <description>Skip table validation on startup</description>
+    </property>
+
+    <property>
+        <name>datanucleus.validateColumns</name>
+        <value>false</value>
+        <description>Skip column validation on startup</description>
+    </property>
+
+    <property>
+        <name>datanucleus.validateConstraints</name>
+        <value>false</value>
+        <description>Skip constraint validation on startup</description>
+    </property>
+
+    <!-- ==========================================
+         FILE SYSTEM CONFIGURATION
+         ========================================== -->
+    
+    <property>
+        <name>hive.metastore.fshandler.threads</name>
+        <value>20</value>
+        <description>Number of threads for handling filesystem operations</description>
+    </property>
+
+    <property>
+        <name>hive.metastore.fs.handler.class</name>
+        <value>org.apache.hadoop.hive.metastore.HiveMetaStoreFsImpl</value>
+        <description>Filesystem handler implementation</description>
+    </property>
 </configuration>
