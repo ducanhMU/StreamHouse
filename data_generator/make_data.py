@@ -23,7 +23,7 @@ DB_PARAMS = { # need to match the schema in docs
     'database': os.getenv('POSTGRES_DB', 'jadc2_db'), # not 'dbname' ??
     'user': os.getenv('POSTGRES_USER', 'admin'),
     'password': os.getenv('POSTGRES_PASSWORD', 'password'),
-    'host': os.getenv('POSTGRES_HOST', 'postgres'),
+    'host': os.getenv('POSTGRES_HOST', 'postgres-source'),
     'port': os.getenv('POSTGRES_PORT', '5432')
 }
 # Configurable record counts from environment variables
