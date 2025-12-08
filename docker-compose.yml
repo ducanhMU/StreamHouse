@@ -25,7 +25,7 @@ services:
     ports:
       - "5433:5432" # avoid confict port
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_source_data:/var/lib/postgresql/data
       - ./postgresql/init_source.sql:/docker-entrypoint-initdb.d/init.sql # for data-generator
       - ./postgresql/create_publication.sql:/docker-entrypoint-initdb.d/create_publication.sql # for debezium
     healthcheck:
@@ -48,19 +48,11 @@ services:
     command:
       - "postgres"
       - "-c"
-      - "wal_level=logical"
-      - "-c"
-      - "max_wal_senders=10"
-      - "-c"
-      - "max_replication_slots=10"
-      - "-c"
-      - "wal_sender_timeout=0"
-      - "-c"
       - "max_connections=200"
     ports:
       - "5434:5432" # avoid confict port
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_dest_data:/var/lib/postgresql/data
       - ./postgresql/init_dest.sql:/docker-entrypoint-initdb.d/init.sql # for data-generator
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d jadc2_db"]
@@ -73,15 +65,11 @@ services:
   kafka: # kraft mode
     container_name: dp_kafka
     image: apache/kafka:latest
-    depends_on:
-      zookeeper:
-        condition: service_healthy
     ports:
       - "9092:9092"
       - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -105,7 +93,7 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      postgres:
+      postgres-source:
         condition: service_healthy
     ports:
       - "8083:8083"
@@ -177,7 +165,6 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
-      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
     healthcheck:
       test: curl -f http://localhost:8080 || exit 1
       interval: 10s
@@ -195,12 +182,12 @@ services:
       POSTGRES_DB: jadc2_db
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: password
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: postgres-source
       POSTGRES_PORT: 5432
       CONTINUOUS_RUN: "true"
       LOOP_INTERVAL_SECONDS: 300
     depends_on:
-      postgres:
+      postgres-source:
         condition: service_healthy
     networks:
       - jadc2
@@ -233,6 +220,7 @@ services:
     volumes:
       - ./jobs:/opt/bitnami/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
+      - ./spark/conf/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf:ro
     networks:
       - jadc2
 
@@ -277,7 +265,7 @@ services:
     depends_on:
       - spark-master
       - kafka
-      - namenode
+      - hdfs-namenode
       - om-server
     environment:
       - SPARK_MASTER_URL=spark://spark-master:7077
@@ -353,7 +341,7 @@ services:
       POSTGRES_HOST_AUTH_METHOD: trust
     command: ["postgres", "-c", "wal_level=logical"]
     ports:
-      - "5435:5432"
+      - "5435:5432" # avoid confict port
     volumes: # persist data
       - hms_data:/var/lib/postgresql/data
     healthcheck:
@@ -371,7 +359,7 @@ services:
       dockerfile: Dockerfile
     hostname: hms
     depends_on:
-      minio:
+      hdfs-namenode:
         condition: service_healthy
       hms-db:
         condition: service_healthy
@@ -382,6 +370,7 @@ services:
       HIVE_METASTORE_JDBC_URL: "jdbc:postgresql://hms-db:5432/hms"
       HIVE_METASTORE_USER: "hive"
       HIVE_METASTORE_PASSWORD: "hive"
+      HIVE_METASTORE_WAREHOUSE_DIR: "hdfs://namenode:9000/user/hive/warehouse"
     command: >
       bash -c "
         /opt/hive-metastore/bin/schematool -dbType postgres -info -userName hive -passWord hive -url jdbc:postgresql://hms-db:5432/hms >/dev/null 2>&1 ||
@@ -962,8 +951,11 @@ services:
       - ingestion-volume-tmp:/tmp
 
 volumes:
-  postgres_data:
+  postgres_source_data:
+  postgres_dest_data:
   kafka_data:
+  namenode_data:
+  datanode_data:
   hms_data:
   ingestion-volume-dag-airflow:
   ingestion-volume-dags:
