@@ -151,24 +151,6 @@ services:
       - jadc2
 
   # ============================================================================
-  # SCHEMA REGISTRY (Cho OpenMetadata đọc cấu trúc Topic)
-  # ============================================================================
-  schema-registry:
-    image: confluentinc/cp-schema-registry:7.5.0
-    container_name: dp_schema_registry
-    hostname: schema-registry
-    depends_on:
-      - kafka
-    ports:
-      - "8089:8081"
-    environment:
-      SCHEMA_REGISTRY_HOST_NAME: schema-registry
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka:9092'
-      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
-    networks:
-      - jadc2
-
-  # ============================================================================
   # DEBEZIUM CDC
   # ============================================================================
   debezium:
@@ -469,25 +451,17 @@ services:
         condition: service_healthy
       hms:
         condition: service_healthy
-      om-server:
-        condition: service_healthy
     environment:
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
-      - OM_SERVER_HOST=om-server
-      - OM_ADMIN_USER=admin
-      - OM_ADMIN_PASSWORD=admin
     volumes:
       - ./jobs:/opt/spark/jobs:ro
-      - ./spark/scripts:/opt/scripts:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
       - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
     command:
       - bash
       - -c
       - |
-        source /opt/scripts/get_om_token.sh
-        
         echo 'Waiting for Spark Master...'
         while ! nc -z spark-master 7077; do sleep 2; done
 
@@ -499,7 +473,6 @@ services:
           --master spark://spark-master:7077 \
           --name 'Job1_Ingest_Kafka_To_HDFS' \
           --deploy-mode client \
-          --conf spark.openmetadata.identity.token="$$OM_JWT_TOKEN" \
           /opt/spark/jobs/job1_ingest.py
     networks:
       - jadc2
@@ -516,25 +489,17 @@ services:
         condition: service_healthy
       postgres-dest:
         condition: service_healthy
-      om-server:
-        condition: service_healthy
     environment:
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
-      - OM_SERVER_HOST=om-server
-      - OM_ADMIN_USER=admin
-      - OM_ADMIN_PASSWORD=admin
     volumes:
       - ./jobs:/opt/spark/jobs:ro
-      - ./spark/scripts:/opt/scripts:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
       - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
     command:
       - bash
       - -c
       - |
-        source /opt/scripts/get_om_token.sh
-
         echo 'Waiting for Spark Master...'
         while ! nc -z spark-master 7077; do sleep 2; done
         
@@ -542,285 +507,22 @@ services:
         while ! nc -z postgres-dest 5432; do sleep 2; done
 
         echo 'Waiting for Data (Bronze Table: units_raw)...'
-        # Check if Delta table exists by trying to read it lightly
-        until /opt/spark/bin/spark-submit --master local[*] --execute "spark.read.format('delta').load('hdfs://namenode:9000/data/delta/bronze/units_raw').limit(1).count()" > /dev/null 2>&1; do
-          echo 'Bronze tables not ready yet. Sleeping 20s...'
+      
+        until /opt/spark/bin/hdfs dfs -test -e hdfs://namenode:9000/data/delta/bronze/units_raw/_delta_log; do
+          echo 'Bronze tables (delta log) not found. Sleeping 20s...'
           sleep 20
         done
-
+       
         echo 'Submitting Processing Job...'
         /opt/spark/bin/spark-submit \
           --master spark://spark-master:7077 \
           --name 'Job2_Process_HDFS_To_Postgres' \
           --deploy-mode client \
-          --conf spark.openmetadata.identity.token="$$OM_JWT_TOKEN" \
           /opt/spark/jobs/job2_process.py
     networks:
       - jadc2
-
-  # ============================================================================
-  # OPENMETADATA - DATABASE
-  # ============================================================================
-  om-mysql:
-    container_name: dp_om_mysql
-    image: ducanhnene/viettel-metadata:mysql
-    command: "--sort_buffer_size=10M"
-    restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: password
-    expose:
-      - 3306
-    ports:
-      - "3307:3306" # Mapped to 3307 to avoid conflict
-    volumes:
-      - om_mysql_data:/var/lib/mysql
-    networks:
-      - jadc2
-    healthcheck:
-      test: mysql --user=root --password=$$MYSQL_ROOT_PASSWORD --silent --execute "use openmetadata_db"
-      interval: 15s
-      timeout: 10s
-      retries: 10
-
-  # ============================================================================
-  # OPENMETADATA - ELASTICSEARCH
-  # ============================================================================
-  om-elasticsearch:
-    container_name: dp_om_elasticsearch
-    image: ducanhnene/viettel-metadata:elasticsearch
-    environment:
-      - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms1024m -Xmx1024m
-      - xpack.security.enabled=false
-      # --- FIX BẮT ĐẦU: Ép ES chạy kể cả khi disk đầy ---
-      # Cảnh báo (Low) khi còn dưới 10GB
-      - cluster.routing.allocation.disk.watermark.low=10gb
-      # Chặn phân bổ Shard (High) khi còn dưới 5GB
-      - cluster.routing.allocation.disk.watermark.high=5gb
-      # Chặn ghi dữ liệu hoàn toàn (Flood Stage) khi còn dưới 2GB
-      - cluster.routing.allocation.disk.watermark.flood_stage=2gb
-      # --- FIX KẾT THÚC ---
-    networks:
-      - jadc2
-    ports:
-      - "9200:9200"
-      - "9300:9300"
-    healthcheck:
-      test: "curl -s http://localhost:9200/_cluster/health?pretty | grep status | grep -qE 'green|yellow' || exit 1"
-      interval: 15s
-      timeout: 10s
-      retries: 10
-    volumes:
-      - om_es_data:/usr/share/elasticsearch/data
-
-  # ============================================================================
-  # OPENMETADATA - MIGRATION
-  # ============================================================================
-  om-migrate:
-    container_name: dp_om_migrate
-    image: ducanhnene/viettel-metadata:migrate
-    command: "./bootstrap/openmetadata-ops.sh migrate"
-    depends_on:
-      om-elasticsearch:
-        condition: service_healthy
-      om-mysql:
-        condition: service_healthy
-    networks:
-      - jadc2
-    environment:
-      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
-      SERVER_PORT: ${SERVER_PORT:-8585}
-      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       
-      # Migration
-      MIGRATION_LIMIT_PARAM: ${MIGRATION_LIMIT_PARAM:-1200}
-      
-      # Database configuration (Updated HOST to om-mysql)
-      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
-      DB_SCHEME: ${DB_SCHEME:-mysql}
-      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
-      DB_USER: ${DB_USER:-openmetadata_user}
-      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
-      DB_HOST: om-mysql
-      DB_PORT: ${DB_PORT:-3306}
-      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
-
-      # ElasticSearch Configurations (Updated HOST to om-elasticsearch)
-      ELASTICSEARCH_HOST: om-elasticsearch
-      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
-      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
-      SEARCH_TYPE: ${SEARCH_TYPE:-"elasticsearch"}
-
-      # OpenMetadata Server Authentication Configuration
-      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
-      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
-      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
-      AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN: ${AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN:-["all"]}
-      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
-      AUTHORIZER_PRINCIPAL_DOMAIN: ${AUTHORIZER_PRINCIPAL_DOMAIN:-"open-metadata.org"}
-      AUTHORIZER_ALLOWED_DOMAINS: ${AUTHORIZER_ALLOWED_DOMAINS:-[]}
-      AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN: ${AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN:-false}
-      AUTHORIZER_ENABLE_SECURE_SOCKET: ${AUTHORIZER_ENABLE_SECURE_SOCKET:-false}
-      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
-      AUTHENTICATION_RESPONSE_TYPE: ${AUTHENTICATION_RESPONSE_TYPE:-id_token}
-      CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME: ${CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME:-""}
-      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
-      AUTHENTICATION_AUTHORITY: ${AUTHENTICATION_AUTHORITY:-https://accounts.google.com}
-      AUTHENTICATION_CLIENT_ID: ${AUTHENTICATION_CLIENT_ID:-""}
-      AUTHENTICATION_CALLBACK_URL: ${AUTHENTICATION_CALLBACK_URL:-""}
-      AUTHENTICATION_JWT_PRINCIPAL_CLAIMS: ${AUTHENTICATION_JWT_PRINCIPAL_CLAIMS:-[email,preferred_username,sub]}
-      AUTHENTICATION_JWT_PRINCIPAL_CLAIMS_MAPPING: ${AUTHENTICATION_JWT_PRINCIPAL_CLAIMS_MAPPING:-[]}
-      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
-      AUTHENTICATION_CLIENT_TYPE: ${AUTHENTICATION_CLIENT_TYPE:-public}
-      
-      # JWT Configuration
-      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
-      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
-      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
-      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
-
-  # ============================================================================
-  # OPENMETADATA - SERVER
-  # ============================================================================
-  om-server:
-    container_name: dp_om_server
-    restart: always
-    image: ducanhnene/viettel-metadata:server
-    depends_on:
-      om-elasticsearch:
-        condition: service_healthy
-      om-mysql:
-        condition: service_healthy
-      om-migrate:
-        condition: service_completed_successfully
-    networks:
-      - jadc2
-    expose:
-      - 8585
-      - 8586
-    ports:
-      - "8585:8585"
-      - "8586:8586"
-    healthcheck:
-      test: [ "CMD", "wget", "-q", "--spider",  "http://localhost:8586/healthcheck" ]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-    environment:
-      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
-      SERVER_PORT: ${SERVER_PORT:-8585}
-      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-
-      # Pipeline Service Client (Updated to point to om-ingestion)
-      PIPELINE_SERVICE_CLIENT_ENDPOINT: http://om-ingestion:8080
-      PIPELINE_SERVICE_CLIENT_HEALTH_CHECK_INTERVAL: ${PIPELINE_SERVICE_CLIENT_HEALTH_CHECK_INTERVAL:-300}
-      SERVER_HOST_API_URL: ${SERVER_HOST_API_URL:-http://om-server:8585/api}
-      PIPELINE_SERVICE_CLIENT_VERIFY_SSL: ${PIPELINE_SERVICE_CLIENT_VERIFY_SSL:-"no-ssl"}
-      PIPELINE_SERVICE_CLIENT_SSL_CERT_PATH: ${PIPELINE_SERVICE_CLIENT_SSL_CERT_PATH:-""}
-
-      # Database (Updated HOST to om-mysql)
-      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
-      DB_SCHEME: ${DB_SCHEME:-mysql}
-      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
-      DB_USER: ${DB_USER:-openmetadata_user}
-      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
-      DB_HOST: om-mysql
-      DB_PORT: ${DB_PORT:-3306}
-      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
-
-      # ElasticSearch (Updated HOST to om-elasticsearch)
-      ELASTICSEARCH_HOST: om-elasticsearch
-      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
-      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
-      ELASTICSEARCH_USER: ${ELASTICSEARCH_USER:-""}
-      ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-""}
-      SEARCH_TYPE: ${SEARCH_TYPE:- "elasticsearch"}
-      ELASTICSEARCH_TRUST_STORE_PATH: ${ELASTICSEARCH_TRUST_STORE_PATH:-""}
-      ELASTICSEARCH_TRUST_STORE_PASSWORD: ${ELASTICSEARCH_TRUST_STORE_PASSWORD:-""}
-      ELASTICSEARCH_CONNECTION_TIMEOUT_SECS: ${ELASTICSEARCH_CONNECTION_TIMEOUT_SECS:-5}
-      ELASTICSEARCH_SOCKET_TIMEOUT_SECS: ${ELASTICSEARCH_SOCKET_TIMEOUT_SECS:-60}
-      ELASTICSEARCH_KEEP_ALIVE_TIMEOUT_SECS: ${ELASTICSEARCH_KEEP_ALIVE_TIMEOUT_SECS:-600}
-      ELASTICSEARCH_BATCH_SIZE: ${ELASTICSEARCH_BATCH_SIZE:-100}
-      ELASTICSEARCH_PAYLOAD_BYTES_SIZE: ${ELASTICSEARCH_PAYLOAD_BYTES_SIZE:-10485760}
-      ELASTICSEARCH_INDEX_MAPPING_LANG: ${ELASTICSEARCH_INDEX_MAPPING_LANG:-EN}
-
-      # Heap OPTS Configurations
-      OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
-      
-      # Auth Configs (Preserved)
-      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
-      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
-      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
-      AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN: ${AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN:-["all"]}
-      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
-      AUTHORIZER_PRINCIPAL_DOMAIN: ${AUTHORIZER_PRINCIPAL_DOMAIN:-"open-metadata.org"}
-      AUTHORIZER_ALLOWED_DOMAINS: ${AUTHORIZER_ALLOWED_DOMAINS:-[]}
-      AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN: ${AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN:-false}
-      AUTHORIZER_ENABLE_SECURE_SOCKET: ${AUTHORIZER_ENABLE_SECURE_SOCKET:-false}
-      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
-      AUTHENTICATION_RESPONSE_TYPE: ${AUTHENTICATION_RESPONSE_TYPE:-id_token}
-      CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME: ${CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME:-""}
-      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
-      AUTHENTICATION_AUTHORITY: ${AUTHENTICATION_AUTHORITY:-https://accounts.google.com}
-      AUTHENTICATION_CLIENT_ID: ${AUTHENTICATION_CLIENT_ID:-""}
-      AUTHENTICATION_CALLBACK_URL: ${AUTHENTICATION_CALLBACK_URL:-""}
-      AUTHENTICATION_JWT_PRINCIPAL_CLAIMS: ${AUTHENTICATION_JWT_PRINCIPAL_CLAIMS:-[email,preferred_username,sub]}
-      AUTHENTICATION_JWT_PRINCIPAL_CLAIMS_MAPPING: ${AUTHENTICATION_JWT_PRINCIPAL_CLAIMS_MAPPING:-[]}
-      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
-      AUTHENTICATION_CLIENT_TYPE: ${AUTHENTICATION_CLIENT_TYPE:-public}
-      
-      # JWT Configuration
-      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
-      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
-      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
-      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
-
-  # ============================================================================
-  # OPENMETADATA - INGESTION
-  # ============================================================================
-  om-ingestion:
-    container_name: dp_om_ingestion
-    image: openmetadata/ingestion:1.10.0
-    depends_on:
-      om-elasticsearch:
-        condition: service_started
-      om-mysql:
-        condition: service_healthy
-      om-server:
-        condition: service_started
-    entrypoint: /bin/bash
-    command:
-      - "/opt/airflow/ingestion_dependency.sh"
-    expose:
-      - 8080
-    ports:
-      - "8081:8080" # Mapped to 8081
-    networks:
-      - jadc2
-    volumes:
-      - om_ingestion_dag_config:/opt/airflow/dag_generated_configs
-      - om_ingestion_dags:/opt/airflow/dags
-      - om_ingestion_tmp:/tmp
-    environment:
-      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__OPENMETADATA_AIRFLOW_APIS__DAG_GENERATED_CONFIGS: "/opt/airflow/dag_generated_configs"
-      
-      # Database for Airflow (Updated HOST to om-mysql)
-      DB_HOST: om-mysql
-      DB_PORT: ${AIRFLOW_DB_PORT:-3306}
-      AIRFLOW_DB: ${AIRFLOW_DB:-airflow_db}
-      DB_SCHEME: ${AIRFLOW_DB_SCHEME:-mysql+mysqldb}
-      DB_USER: ${AIRFLOW_DB_USER:-airflow_user}
-      DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_pass}
-      DB_PROPERTIES: ${AIRFLOW_DB_PROPERTIES:-}
-
-      # OM Connection (Updated Endpoint to om-server)
-      AIRFLOW__OPENMETADATA_AIRFLOW_APIS__OPENMETADATA_API_ENDPOINT: http://om-server:8585/api
-
-# ============================================================================
+#=============================================================================
 # VOLUMES
 # ============================================================================
 volumes:
@@ -831,13 +533,6 @@ volumes:
   namenode_data:
   datanode_data:
   hms_data:
-  
-  # OpenMetadata Volumes (Updated to match requested names)
-  om_mysql_data:
-  om_es_data:
-  om_ingestion_dag_config:
-  om_ingestion_dags:
-  om_ingestion_tmp:
 
 # ============================================================================
 # NETWORKS

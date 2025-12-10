@@ -11,29 +11,26 @@ RUN apt-get update && apt-get install -y \
 # Set environment variables
 ENV SPARK_HOME=/opt/spark
 ENV PATH=$SPARK_HOME/bin:$PATH
-# Add extra jars to classpath
-ENV SPARK_CLASSPATH="/opt/spark/jars_extra/*"
-
-# Create directories
-RUN mkdir -p $SPARK_HOME/jars_extra $SPARK_HOME/conf_custom
+# BỎ DÒNG NÀY: ENV SPARK_CLASSPATH... (Không cần thiết nữa)
 
 # 2. Download Libraries
-# Delta Lake 2.4.0 (Compatible with Spark 3.4)
-RUN wget -P $SPARK_HOME/jars_extra https://repo1.maven.org/maven2/io/delta/delta-core_2.12/2.4.0/delta-core_2.12-2.4.0.jar && \
-    wget -P $SPARK_HOME/jars_extra https://repo1.maven.org/maven2/io/delta/delta-storage/2.4.0/delta-storage-2.4.0.jar
+# CHIẾN THUẬT: Tải thẳng vào $SPARK_HOME/jars để Spark tự nhận diện
+
+# Delta Lake 2.4.0
+RUN wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/io/delta/delta-core_2.12/2.4.0/delta-core_2.12-2.4.0.jar && \
+    wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/io/delta/delta-storage/2.4.0/delta-storage-2.4.0.jar
 
 # PostgreSQL Driver
-RUN wget -P $SPARK_HOME/jars_extra https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
+RUN wget -P $SPARK_HOME/jars https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
 
-# Kafka Integration
-RUN wget -P $SPARK_HOME/jars_extra https://repo1.maven.org/maven2/org/apache/spark/spark-sql-kafka-0-10_2.12/3.4.1/spark-sql-kafka-0-10_2.12-3.4.1.jar && \
-    wget -P $SPARK_HOME/jars_extra https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.4.0/kafka-clients-3.4.0.jar && \
-    wget -P $SPARK_HOME/jars_extra https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar && \
-    wget -P $SPARK_HOME/jars_extra https://repo1.maven.org/maven2/org/apache/spark/spark-token-provider-kafka-0-10_2.12/3.4.1/spark-token-provider-kafka-0-10_2.12-3.4.1.jar
+# Kafka Integration (Đã đủ bộ)
+RUN wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/spark/spark-sql-kafka-0-10_2.12/3.4.1/spark-sql-kafka-0-10_2.12-3.4.1.jar && \
+    wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.4.0/kafka-clients-3.4.0.jar && \
+    wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar && \
+    wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/spark/spark-token-provider-kafka-0-10_2.12/3.4.1/spark-token-provider-kafka-0-10_2.12-3.4.1.jar
 
-# OpenMetadata Agent (Using 1.0-beta as requested)
-# Group ID: org.open-metadata (Note the hyphen and 'org')
-RUN wget -P $SPARK_HOME/jars_extra https://repo1.maven.org/maven2/org/open-metadata/openmetadata-spark-agent/1.0-beta/openmetadata-spark-agent-1.0-beta.jar
+# OpenMetadata Agent
+RUN wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/open-metadata/openmetadata-spark-agent/1.0-beta/openmetadata-spark-agent-1.0-beta.jar
 
 # 3. Install Python dependencies
 RUN pip install --no-cache-dir \
@@ -52,7 +49,8 @@ COPY scripts/get_om_token.sh /opt/scripts/
 RUN chmod +x /opt/scripts/get_om_token.sh
 
 # 6. Fix Permissions
-RUN chown -R spark:spark $SPARK_HOME /opt/scripts
+# Quan trọng: Cấp quyền cho user spark sở hữu file jar mới tải
+RUN chown -R spark:spark $SPARK_HOME/jars /opt/scripts
 
 # 7. Expose Ports
 EXPOSE 4040 7077 8080 8081
@@ -61,5 +59,4 @@ EXPOSE 4040 7077 8080 8081
 WORKDIR /opt/spark/work-dir
 USER spark
 
-# Keep container alive
 CMD ["tail", "-f", "/dev/null"]
