@@ -189,7 +189,7 @@ Spark needs permission to push metadata to OpenMetadata.
 
 3. **Ingest "Postgres Source" Metadata**
 
-- In OM UI, go to **Services** -> **Databases** -> **Add New Service**.
+- In OM UI, go to **Settings** -> **Services** -> **Databases** -> **Add New Service**.
 
 - Select **Postgres**. Name it `postgres_source`.
 
@@ -209,7 +209,7 @@ Spark needs permission to push metadata to OpenMetadata.
 
 4. **Ingest "Kafka" Metadata**
 
-- Go to **Services** -> **Messaging** -> **Add New Service**.
+- Go to **Settings** -> **Services** -> **Messaging** -> **Add New Service**.
 
 - Select **Kafka**. Name it `kafka_messaging`.
 
@@ -225,7 +225,7 @@ Spark needs permission to push metadata to OpenMetadata.
 
 This step links Postgres Source to Kafka Topics.
 
-- OM UI -> **Services** -> **Pipeline** -> **Add New Service**.
+- In OM UI: **Settings** -> **Services** -> **Pipeline** -> **Add New Service**.
 
 - Select **Kafka Connect**. Name: `debezium_cdc`.
 
@@ -237,7 +237,7 @@ This step links Postgres Source to Kafka Topics.
 
 6. **Ingest "HDFS" Metadata (Storage Service)**
 
-- Go to **Services** -> **Storage** -> **Add New Service**.
+- Go to **Settings** -> **Services** -> **Storage** -> **Add New Service**.
 
 - Select **HDFS** (or Data Lake). Name it `hdfs_datalake`.
 
@@ -253,7 +253,7 @@ This step links Postgres Source to Kafka Topics.
 
 7. **Ingest "Postgres Destination" Metadata**
 
-- Go to **Services** -> **Databases** -> **Add New Service**.
+- Go to **Settings** -> **Services** -> **Databases** -> **Add New Service**.
 
 - Select **Postgres**. Name it `postgres_dest`.
 

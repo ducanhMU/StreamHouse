@@ -1,11 +1,10 @@
 version: "3.8"
-
 services:
   # ============================================================================
-  # SOURCE & DESTINATION DATABASES
+  # SOURCE DATABASE (Có cấu hình WAL cho Debezium + Stats cho OpenMetadata)
   # ============================================================================
   postgres-source:
-    container_name: dp_source
+    container_name: dp_postgres_source
     image: postgres:14
     environment:
       POSTGRES_DB: jadc2_db
@@ -16,7 +15,7 @@ services:
     command:
       - "postgres"
       - "-c"
-      - "wal_level=logical"
+      - "wal_level=logical"          # Cần cho Debezium (CDC)
       - "-c"
       - "max_wal_senders=10"
       - "-c"
@@ -25,6 +24,15 @@ services:
       - "wal_sender_timeout=0"
       - "-c"
       - "max_connections=200"
+      # --- THÊM PHẦN NÀY CHO OPENMETADATA ---
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+      - "-c"
+      - "pg_stat_statements.max=10000"
+      - "-c"
+      - "track_activity_query_size=2048"
     ports:
       - "5433:5432"
     volumes:
@@ -38,9 +46,12 @@ services:
       retries: 5
     networks:
       - jadc2
-
+    
+  # ============================================================================
+  # DESTINATION DATABASE (Thêm Stats cho OpenMetadata)
+  # ============================================================================
   postgres-dest:
-    container_name: dp_dest
+    container_name: dp_postgres_dest
     image: postgres:14
     environment:
       POSTGRES_DB: jadc2_db
@@ -52,6 +63,15 @@ services:
       - "postgres"
       - "-c"
       - "max_connections=200"
+      # --- THÊM PHẦN NÀY CHO OPENMETADATA ---
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+      - "-c"
+      - "pg_stat_statements.max=10000"
+      - "-c"
+      - "track_activity_query_size=2048"
     ports:
       - "5434:5432"
     volumes:
@@ -62,6 +82,32 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - jadc2
+
+  # ============================================================================
+  # DATA GENERATOR
+  # ============================================================================
+  data-generator:
+    container_name: dp_data_generator
+    build:
+      context: ./data_generator
+      dockerfile: Dockerfile
+    environment:
+      POSTGRES_DB: jadc2_db
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_HOST: postgres-source
+      POSTGRES_PORT: 5432
+      CONTINUOUS_RUN: "true"
+      LOOP_INTERVAL_SECONDS: 300
+    depends_on:
+      postgres-source:
+        condition: service_healthy
+    healthcheck:
+      interval: 15s
+      timeout: 10s
+      retries: 10
     networks:
       - jadc2
 
@@ -101,6 +147,24 @@ services:
       start_period: 60s
     volumes:
       - kafka_data:/var/lib/kafka/data
+    networks:
+      - jadc2
+
+  # ============================================================================
+  # SCHEMA REGISTRY (Cho OpenMetadata đọc cấu trúc Topic)
+  # ============================================================================
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: dp_schema_registry
+    hostname: schema-registry
+    depends_on:
+      - kafka
+    ports:
+      - "8089:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka:9092'
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
     networks:
       - jadc2
 
@@ -173,7 +237,7 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "8085:8080"
+      - "8086:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
@@ -186,42 +250,25 @@ services:
       - jadc2
 
   # ============================================================================
-  # DATA GENERATOR
-  # ============================================================================
-  data-generator:
-    container_name: dp_data_generator
-    build:
-      context: ./data_generator
-      dockerfile: Dockerfile
-    environment:
-      POSTGRES_DB: jadc2_db
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
-      POSTGRES_HOST: postgres-source
-      POSTGRES_PORT: 5432
-      CONTINUOUS_RUN: "true"
-      LOOP_INTERVAL_SECONDS: 300
-    depends_on:
-      postgres-source:
-        condition: service_healthy
-    networks:
-      - jadc2
-
-  # ============================================================================
   # HDFS CLUSTER
   # ============================================================================
   hdfs-namenode:
     container_name: dp_hdfs_namenode
     image: apache/hadoop:3
     hostname: namenode
-    command: ["hdfs", "namenode"]
+    # CHẠY BẰNG ROOT ĐỂ GHI ĐƯỢC VÀO VOLUME
+    user: "root"
+    # Script: Cấp quyền 777 cho thư mục -> Kiểm tra đã format chưa -> Format -> Chạy
+    command: ["/bin/bash", "-c", "chmod -R 777 /tmp/hadoop-root/dfs/name; if [ ! -d /tmp/hadoop-root/dfs/name/current ]; then echo 'Formatting NameNode...'; hdfs namenode -format -force -nonInteractive; fi; hdfs namenode"]
     ports:
       - "9870:9870"
-      - "9000:9000"
-    env_file:
-      - ./config
+      - "9003:9000"
     environment:
-      ENSURE_NAMENODE_DIR: "/tmp/hadoop-root/dfs/name"
+      # Bắt buộc khi chạy user root
+      HDFS_NAMENODE_USER: "root"
+      CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
+      HDFS-SITE.XML_dfs.replication: "1"
+      HDFS-SITE.XML_dfs.namenode.name.dir: "/tmp/hadoop-root/dfs/name"
     volumes:
       - namenode_data:/tmp/hadoop-root/dfs/name
     healthcheck:
@@ -237,8 +284,12 @@ services:
     container_name: dp_hdfs_datanode
     image: apache/hadoop:3
     command: ["hdfs", "datanode"]
-    env_file:
-      - ./config
+    # CHẠY BẰNG ROOT
+    user: "root"
+    environment:
+      HDFS_DATANODE_USER: "root"
+      CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
+      HDFS-SITE.XML_dfs.replication: "1"
     volumes:
       - datanode_data:/tmp/hadoop-root/dfs/data
     depends_on:
@@ -252,10 +303,14 @@ services:
     image: apache/hadoop:3
     hostname: resourcemanager
     command: ["yarn", "resourcemanager"]
+    user: "root"
     ports:
       - "8088:8088"
-    env_file:
-      - ./config
+    environment:
+      YARN_RESOURCEMANAGER_USER: "root"
+      CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
+      HDFS-SITE.XML_dfs.replication: "1"
+      YARN-SITE.XML_yarn.resourcemanager.hostname: "resourcemanager"
     volumes:
       - ./test.sh:/opt/test.sh
     depends_on:
@@ -268,22 +323,26 @@ services:
     container_name: dp_hdfs_nodemanager
     image: apache/hadoop:3
     command: ["yarn", "nodemanager"]
-    env_file:
-      - ./config
+    user: "root"
+    environment:
+      YARN_NODEMANAGER_USER: "root"
+      CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
+      HDFS-SITE.XML_dfs.replication: "1"
+      YARN-SITE.XML_yarn.resourcemanager.hostname: "resourcemanager"
     depends_on:
       hdfs-namenode:
         condition: service_healthy
     networks:
-      - jadc2
+      - jadc2   
 
   # ============================================================================
-  # HIVE METASTORE
+  # HIVE METASTORE DATABASE (PostgreSQL)
   # ============================================================================
   hms-db:
     container_name: dp_hms_db
     image: postgres:14
     environment:
-      POSTGRES_DB: hms
+      POSTGRES_DB: metastore          # Đã sửa thành 'metastore'
       POSTGRES_USER: hive
       POSTGRES_PASSWORD: hive
       POSTGRES_INITDB_ARGS: --data-checksums
@@ -294,13 +353,16 @@ services:
     volumes:
       - hms_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hive -d hms"]
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
       - jadc2
 
+  # ============================================================================
+  # HIVE METASTORE SERVICE
+  # ============================================================================
   hms:
     container_name: dp_hive_metastore
     build:
@@ -315,24 +377,24 @@ services:
     ports:
       - "9083:9083"
     environment:
-      HMS_LOGLEVEL: INFO
-      HIVE_METASTORE_JDBC_URL: "jdbc:postgresql://hms-db:5432/hms"
-      HIVE_METASTORE_USER: "hive"
-      HIVE_METASTORE_PASSWORD: "hive"
-      HIVE_METASTORE_WAREHOUSE_DIR: "hdfs://namenode:9000/user/hive/warehouse"
-    command: >
-      bash -c "
-        /opt/hive-metastore/bin/schematool -dbType postgres -info -userName hive -passWord hive -url jdbc:postgresql://hms-db:5432/hms >/dev/null 2>&1 ||
-        /opt/hive-metastore/bin/schematool -dbType postgres -initSchema -userName hive -passWord hive -url jdbc:postgresql://hms-db:5432/hms;
-        /opt/hive-metastore/bin/hive --service metastore
-      "
+      # Các biến này sẽ được entrypoint.sh sử dụng
+      POSTGRES_HOST: hms-db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+      HDFS_NAMENODE_HOST: namenode
+      HDFS_NAMENODE_PORT: 9000
+      METASTORE_PORT: 9083
+    # KHÔNG DÙNG 'command' Ở ĐÂY để Docker dùng entrypoint.sh trong image
     volumes:
-      - ./hive-metastore/conf/hive-site.xml:/opt/hive-metastore/conf/hive-site.xml:ro
+      # Mount file cấu hình vào đúng đường dẫn của Image apache/hive
+      - ./hive-metastore/conf/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
     healthcheck:
-      test: ["CMD-SHELL", "nc -z hms 9083 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test: ["CMD-SHELL", "/opt/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     networks:
       - jadc2
 
@@ -355,16 +417,16 @@ services:
       - "8082:8080"
     environment:
       - SPARK_MODE=master
-      - SPARK_MASTER_HOST=spark-master
-      - SPARK_MASTER_PORT=7077
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
-      - SPARK_RPC_AUTHENTICATION_SECRET=my-secret
-      - SPARK_MASTER_WEBUI_PORT=8080
+      - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
+      # Bind rõ ràng để tránh lỗi network
+      - SPARK_MASTER_HOST=spark-master
     volumes:
-      - ./jobs:/opt/bitnami/spark/jobs:ro
+      - ./jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
-      - ./spark/conf/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf:ro
-      - ./spark/scripts:/opt/bitnami/spark/scripts:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    # SỬA LỖI: Chạy class Master thay vì tail -f
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
     networks:
       - jadc2
 
@@ -380,16 +442,15 @@ services:
       - "8084:8081"
     environment:
       - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
       - SPARK_WORKER_CORES=2
       - SPARK_WORKER_MEMORY=2g
-      - SPARK_WORKER_HOSTNAME=spark-worker
-      - SPARK_WORKER_WEBUI_PORT=8081
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
-      - SPARK_RPC_AUTHENTICATION_SECRET=my-secret
+      - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
     volumes:
-      - ./jobs:/opt/bitnami/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    # SỬA LỖI: Chạy class Worker và trỏ về Master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
     networks:
       - jadc2
 
@@ -406,32 +467,40 @@ services:
         condition: service_started
       kafka:
         condition: service_healthy
-      hdfs-namenode:
+      hms:
         condition: service_healthy
       om-server:
         condition: service_healthy
     environment:
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - OM_SERVER_URL=http://om-server:8585
-    command: >
-      bash -c "
-      source /opt/bitnami/spark/scripts/get_om_token.sh
+      - SPARK_RPC_AUTHENTICATION_ENABLED=yes
+      - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
+      - OM_SERVER_HOST=om-server
+      - OM_ADMIN_USER=admin
+      - OM_ADMIN_PASSWORD=admin
+    volumes:
+      - ./jobs:/opt/spark/jobs:ro
+      - ./spark/scripts:/opt/scripts:ro
+      - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    command:
+      - bash
+      - -c
+      - |
+        source /opt/scripts/get_om_token.sh
+        
+        echo 'Waiting for Spark Master...'
+        while ! nc -z spark-master 7077; do sleep 2; done
 
-      echo 'Waiting for Spark Master...';
-      while ! nc -z spark-master 7077; do sleep 2; done;
-
-      echo 'Waiting for Kafka...';
-      while ! nc -z kafka 9092; do sleep 2; done;
-      
-      echo 'Submitting Ingestion Job...';
-      /opt/bitnami/spark/bin/spark-submit \
-        --master spark://spark-master:7077 \
-        --name 'Job1_Ingest_Kafka_To_HDFS' \
-        --deploy-mode client \
-        --conf spark.openmetadata.server.url=http://om-server:8585 \
-        --conf spark.openmetadata.identity.token=\"\$OM_JWT_TOKEN\" \
-        /opt/bitnami/spark/jobs/job1_ingest.py
-      "
+        echo 'Waiting for Kafka...'
+        while ! nc -z kafka 9092; do sleep 2; done
+        
+        echo 'Submitting Ingestion Job...'
+        /opt/spark/bin/spark-submit \
+          --master spark://spark-master:7077 \
+          --name 'Job1_Ingest_Kafka_To_HDFS' \
+          --deploy-mode client \
+          --conf spark.openmetadata.identity.token="$$OM_JWT_TOKEN" \
+          /opt/spark/jobs/job1_ingest.py
     networks:
       - jadc2
 
@@ -443,37 +512,49 @@ services:
     depends_on:
       spark-master:
         condition: service_started
-      hdfs-namenode:
+      hms:
         condition: service_healthy
       postgres-dest:
         condition: service_healthy
       om-server:
         condition: service_healthy
     environment:
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - OM_SERVER_URL=http://om-server:8585
-    command: >
-      bash -c "
-      source /opt/bitnami/spark/scripts/get_om_token.sh
+      - SPARK_RPC_AUTHENTICATION_ENABLED=yes
+      - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
+      - OM_SERVER_HOST=om-server
+      - OM_ADMIN_USER=admin
+      - OM_ADMIN_PASSWORD=admin
+    volumes:
+      - ./jobs:/opt/spark/jobs:ro
+      - ./spark/scripts:/opt/scripts:ro
+      - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    command:
+      - bash
+      - -c
+      - |
+        source /opt/scripts/get_om_token.sh
 
-      echo 'Waiting for Spark Master...';
-      while ! nc -z spark-master 7077; do sleep 2; done;
-      
-      echo 'Waiting for Postgres Destination...';
-      while ! nc -z postgres-dest 5432; do sleep 2; done;
+        echo 'Waiting for Spark Master...'
+        while ! nc -z spark-master 7077; do sleep 2; done
+        
+        echo 'Waiting for Postgres Destination...'
+        while ! nc -z postgres-dest 5432; do sleep 2; done
 
-      echo 'Waiting 30s for Ingest Job to initialize Delta Table...';
-      sleep 30;
+        echo 'Waiting for Data (Bronze Table: units_raw)...'
+        # Check if Delta table exists by trying to read it lightly
+        until /opt/spark/bin/spark-submit --master local[*] --execute "spark.read.format('delta').load('hdfs://namenode:9000/data/delta/bronze/units_raw').limit(1).count()" > /dev/null 2>&1; do
+          echo 'Bronze tables not ready yet. Sleeping 20s...'
+          sleep 20
+        done
 
-      echo 'Submitting Processing Job...';
-      /opt/bitnami/spark/bin/spark-submit \
-        --master spark://spark-master:7077 \
-        --name 'Job2_Process_HDFS_To_Postgres' \
-        --deploy-mode client \
-        --conf spark.openmetadata.server.url=http://om-server:8585 \
-        --conf spark.openmetadata.identity.token=\"\$OM_JWT_TOKEN\" \
-        /opt/bitnami/spark/jobs/job2_process.py
-      "
+        echo 'Submitting Processing Job...'
+        /opt/spark/bin/spark-submit \
+          --master spark://spark-master:7077 \
+          --name 'Job2_Process_HDFS_To_Postgres' \
+          --deploy-mode client \
+          --conf spark.openmetadata.identity.token="$$OM_JWT_TOKEN" \
+          /opt/spark/jobs/job2_process.py
     networks:
       - jadc2
 
@@ -482,7 +563,7 @@ services:
   # ============================================================================
   om-mysql:
     container_name: dp_om_mysql
-    image: docker.getcollate.io/openmetadata/db:1.10.0-SNAPSHOT
+    image: ducanhnene/viettel-metadata:mysql
     command: "--sort_buffer_size=10M"
     restart: always
     environment:
@@ -490,7 +571,7 @@ services:
     expose:
       - 3306
     ports:
-      - "3307:3306"  # Changed to avoid conflict
+      - "3307:3306" # Mapped to 3307 to avoid conflict
     volumes:
       - om_mysql_data:/var/lib/mysql
     networks:
@@ -506,11 +587,19 @@ services:
   # ============================================================================
   om-elasticsearch:
     container_name: dp_om_elasticsearch
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.4
+    image: ducanhnene/viettel-metadata:elasticsearch
     environment:
       - discovery.type=single-node
       - ES_JAVA_OPTS=-Xms1024m -Xmx1024m
       - xpack.security.enabled=false
+      # --- FIX BẮT ĐẦU: Ép ES chạy kể cả khi disk đầy ---
+      # Cảnh báo (Low) khi còn dưới 10GB
+      - cluster.routing.allocation.disk.watermark.low=10gb
+      # Chặn phân bổ Shard (High) khi còn dưới 5GB
+      - cluster.routing.allocation.disk.watermark.high=5gb
+      # Chặn ghi dữ liệu hoàn toàn (Flood Stage) khi còn dưới 2GB
+      - cluster.routing.allocation.disk.watermark.flood_stage=2gb
+      # --- FIX KẾT THÚC ---
     networks:
       - jadc2
     ports:
@@ -529,57 +618,8 @@ services:
   # ============================================================================
   om-migrate:
     container_name: dp_om_migrate
-    image: docker.getcollate.io/openmetadata/server:1.10.0-SNAPSHOT
+    image: ducanhnene/viettel-metadata:migrate
     command: "./bootstrap/openmetadata-ops.sh migrate"
-    environment:
-      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
-      SERVER_PORT: ${SERVER_PORT:-8585}
-      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      MIGRATION_LIMIT_PARAM: ${MIGRATION_LIMIT_PARAM:-1200}
-      
-      # Authentication
-      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
-      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
-      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
-      AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN: ${AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN:-["all"]}
-      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
-      AUTHORIZER_PRINCIPAL_DOMAIN: ${AUTHORIZER_PRINCIPAL_DOMAIN:-"open-metadata.org"}
-      AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN: ${AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN:-false}
-      AUTHORIZER_ENABLE_SECURE_SOCKET: ${AUTHORIZER_ENABLE_SECURE_SOCKET:-false}
-      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
-      AUTHENTICATION_RESPONSE_TYPE: ${AUTHENTICATION_RESPONSE_TYPE:-id_token}
-      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
-      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
-      AUTHENTICATION_CLIENT_TYPE: ${AUTHENTICATION_CLIENT_TYPE:-public}
-      
-      # JWT
-      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
-      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
-      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
-      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
-      
-      # Database
-      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
-      DB_SCHEME: ${DB_SCHEME:-mysql}
-      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
-      DB_USER: ${DB_USER:-openmetadata_user}
-      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
-      DB_HOST: ${DB_HOST:-om-mysql}
-      DB_PORT: ${DB_PORT:-3306}
-      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
-      
-      # Elasticsearch
-      ELASTICSEARCH_HOST: ${ELASTICSEARCH_HOST:-om-elasticsearch}
-      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
-      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
-      SEARCH_TYPE: ${SEARCH_TYPE:-"elasticsearch"}
-      
-      # Pipeline Service
-      PIPELINE_SERVICE_CLIENT_ENDPOINT: ${PIPELINE_SERVICE_CLIENT_ENDPOINT:-http://om-ingestion:8080}
-      SERVER_HOST_API_URL: ${SERVER_HOST_API_URL:-http://om-server:8585/api}
-      
-      OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
     depends_on:
       om-elasticsearch:
         condition: service_healthy
@@ -587,6 +627,58 @@ services:
         condition: service_healthy
     networks:
       - jadc2
+    environment:
+      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
+      SERVER_PORT: ${SERVER_PORT:-8585}
+      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      
+      # Migration
+      MIGRATION_LIMIT_PARAM: ${MIGRATION_LIMIT_PARAM:-1200}
+      
+      # Database configuration (Updated HOST to om-mysql)
+      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
+      DB_SCHEME: ${DB_SCHEME:-mysql}
+      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
+      DB_USER: ${DB_USER:-openmetadata_user}
+      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
+      DB_HOST: om-mysql
+      DB_PORT: ${DB_PORT:-3306}
+      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
+
+      # ElasticSearch Configurations (Updated HOST to om-elasticsearch)
+      ELASTICSEARCH_HOST: om-elasticsearch
+      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
+      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
+      SEARCH_TYPE: ${SEARCH_TYPE:-"elasticsearch"}
+
+      # OpenMetadata Server Authentication Configuration
+      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
+      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
+      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
+      AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN: ${AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN:-["all"]}
+      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
+      AUTHORIZER_PRINCIPAL_DOMAIN: ${AUTHORIZER_PRINCIPAL_DOMAIN:-"open-metadata.org"}
+      AUTHORIZER_ALLOWED_DOMAINS: ${AUTHORIZER_ALLOWED_DOMAINS:-[]}
+      AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN: ${AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN:-false}
+      AUTHORIZER_ENABLE_SECURE_SOCKET: ${AUTHORIZER_ENABLE_SECURE_SOCKET:-false}
+      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
+      AUTHENTICATION_RESPONSE_TYPE: ${AUTHENTICATION_RESPONSE_TYPE:-id_token}
+      CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME: ${CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME:-""}
+      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
+      AUTHENTICATION_AUTHORITY: ${AUTHENTICATION_AUTHORITY:-https://accounts.google.com}
+      AUTHENTICATION_CLIENT_ID: ${AUTHENTICATION_CLIENT_ID:-""}
+      AUTHENTICATION_CALLBACK_URL: ${AUTHENTICATION_CALLBACK_URL:-""}
+      AUTHENTICATION_JWT_PRINCIPAL_CLAIMS: ${AUTHENTICATION_JWT_PRINCIPAL_CLAIMS:-[email,preferred_username,sub]}
+      AUTHENTICATION_JWT_PRINCIPAL_CLAIMS_MAPPING: ${AUTHENTICATION_JWT_PRINCIPAL_CLAIMS_MAPPING:-[]}
+      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
+      AUTHENTICATION_CLIENT_TYPE: ${AUTHENTICATION_CLIENT_TYPE:-public}
+      
+      # JWT Configuration
+      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
+      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
+      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
+      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
 
   # ============================================================================
   # OPENMETADATA - SERVER
@@ -594,64 +686,7 @@ services:
   om-server:
     container_name: dp_om_server
     restart: always
-    image: docker.getcollate.io/openmetadata/server:1.10.0-SNAPSHOT
-    environment:
-      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
-      SERVER_PORT: ${SERVER_PORT:-8585}
-      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      
-      # Authentication
-      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
-      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
-      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
-      AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN: ${AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN:-["all"]}
-      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
-      AUTHORIZER_PRINCIPAL_DOMAIN: ${AUTHORIZER_PRINCIPAL_DOMAIN:-"open-metadata.org"}
-      AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN: ${AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN:-false}
-      AUTHORIZER_ENABLE_SECURE_SOCKET: ${AUTHORIZER_ENABLE_SECURE_SOCKET:-false}
-      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
-      AUTHENTICATION_RESPONSE_TYPE: ${AUTHENTICATION_RESPONSE_TYPE:-id_token}
-      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
-      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
-      AUTHENTICATION_CLIENT_TYPE: ${AUTHENTICATION_CLIENT_TYPE:-public}
-      
-      # JWT
-      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
-      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
-      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
-      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
-      
-      # Pipeline Service
-      PIPELINE_SERVICE_CLIENT_ENDPOINT: ${PIPELINE_SERVICE_CLIENT_ENDPOINT:-http://om-ingestion:8080}
-      PIPELINE_SERVICE_CLIENT_HEALTH_CHECK_INTERVAL: ${PIPELINE_SERVICE_CLIENT_HEALTH_CHECK_INTERVAL:-300}
-      SERVER_HOST_API_URL: ${SERVER_HOST_API_URL:-http://om-server:8585/api}
-      PIPELINE_SERVICE_CLIENT_ENABLED: ${PIPELINE_SERVICE_CLIENT_ENABLED:-true}
-      
-      # Database
-      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
-      DB_SCHEME: ${DB_SCHEME:-mysql}
-      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
-      DB_USER: ${DB_USER:-openmetadata_user}
-      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
-      DB_HOST: ${DB_HOST:-om-mysql}
-      DB_PORT: ${DB_PORT:-3306}
-      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
-      
-      # Elasticsearch
-      ELASTICSEARCH_HOST: ${ELASTICSEARCH_HOST:-om-elasticsearch}
-      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
-      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
-      SEARCH_TYPE: ${SEARCH_TYPE:-"elasticsearch"}
-      
-      OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
-    
-    expose:
-      - 8585
-      - 8586
-    ports:
-      - "8585:8585"
-      - "8586:8586"
+    image: ducanhnene/viettel-metadata:server
     depends_on:
       om-elasticsearch:
         condition: service_healthy
@@ -661,60 +696,143 @@ services:
         condition: service_completed_successfully
     networks:
       - jadc2
+    expose:
+      - 8585
+      - 8586
+    ports:
+      - "8585:8585"
+      - "8586:8586"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8586/healthcheck"]
+      test: [ "CMD", "wget", "-q", "--spider",  "http://localhost:8586/healthcheck" ]
       interval: 15s
       timeout: 10s
       retries: 10
+    environment:
+      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
+      SERVER_PORT: ${SERVER_PORT:-8585}
+      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # Pipeline Service Client (Updated to point to om-ingestion)
+      PIPELINE_SERVICE_CLIENT_ENDPOINT: http://om-ingestion:8080
+      PIPELINE_SERVICE_CLIENT_HEALTH_CHECK_INTERVAL: ${PIPELINE_SERVICE_CLIENT_HEALTH_CHECK_INTERVAL:-300}
+      SERVER_HOST_API_URL: ${SERVER_HOST_API_URL:-http://om-server:8585/api}
+      PIPELINE_SERVICE_CLIENT_VERIFY_SSL: ${PIPELINE_SERVICE_CLIENT_VERIFY_SSL:-"no-ssl"}
+      PIPELINE_SERVICE_CLIENT_SSL_CERT_PATH: ${PIPELINE_SERVICE_CLIENT_SSL_CERT_PATH:-""}
+
+      # Database (Updated HOST to om-mysql)
+      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
+      DB_SCHEME: ${DB_SCHEME:-mysql}
+      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
+      DB_USER: ${DB_USER:-openmetadata_user}
+      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
+      DB_HOST: om-mysql
+      DB_PORT: ${DB_PORT:-3306}
+      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
+
+      # ElasticSearch (Updated HOST to om-elasticsearch)
+      ELASTICSEARCH_HOST: om-elasticsearch
+      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
+      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
+      ELASTICSEARCH_USER: ${ELASTICSEARCH_USER:-""}
+      ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-""}
+      SEARCH_TYPE: ${SEARCH_TYPE:- "elasticsearch"}
+      ELASTICSEARCH_TRUST_STORE_PATH: ${ELASTICSEARCH_TRUST_STORE_PATH:-""}
+      ELASTICSEARCH_TRUST_STORE_PASSWORD: ${ELASTICSEARCH_TRUST_STORE_PASSWORD:-""}
+      ELASTICSEARCH_CONNECTION_TIMEOUT_SECS: ${ELASTICSEARCH_CONNECTION_TIMEOUT_SECS:-5}
+      ELASTICSEARCH_SOCKET_TIMEOUT_SECS: ${ELASTICSEARCH_SOCKET_TIMEOUT_SECS:-60}
+      ELASTICSEARCH_KEEP_ALIVE_TIMEOUT_SECS: ${ELASTICSEARCH_KEEP_ALIVE_TIMEOUT_SECS:-600}
+      ELASTICSEARCH_BATCH_SIZE: ${ELASTICSEARCH_BATCH_SIZE:-100}
+      ELASTICSEARCH_PAYLOAD_BYTES_SIZE: ${ELASTICSEARCH_PAYLOAD_BYTES_SIZE:-10485760}
+      ELASTICSEARCH_INDEX_MAPPING_LANG: ${ELASTICSEARCH_INDEX_MAPPING_LANG:-EN}
+
+      # Heap OPTS Configurations
+      OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
+      
+      # Auth Configs (Preserved)
+      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
+      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
+      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
+      AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN: ${AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN:-["all"]}
+      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
+      AUTHORIZER_PRINCIPAL_DOMAIN: ${AUTHORIZER_PRINCIPAL_DOMAIN:-"open-metadata.org"}
+      AUTHORIZER_ALLOWED_DOMAINS: ${AUTHORIZER_ALLOWED_DOMAINS:-[]}
+      AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN: ${AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN:-false}
+      AUTHORIZER_ENABLE_SECURE_SOCKET: ${AUTHORIZER_ENABLE_SECURE_SOCKET:-false}
+      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
+      AUTHENTICATION_RESPONSE_TYPE: ${AUTHENTICATION_RESPONSE_TYPE:-id_token}
+      CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME: ${CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME:-""}
+      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
+      AUTHENTICATION_AUTHORITY: ${AUTHENTICATION_AUTHORITY:-https://accounts.google.com}
+      AUTHENTICATION_CLIENT_ID: ${AUTHENTICATION_CLIENT_ID:-""}
+      AUTHENTICATION_CALLBACK_URL: ${AUTHENTICATION_CALLBACK_URL:-""}
+      AUTHENTICATION_JWT_PRINCIPAL_CLAIMS: ${AUTHENTICATION_JWT_PRINCIPAL_CLAIMS:-[email,preferred_username,sub]}
+      AUTHENTICATION_JWT_PRINCIPAL_CLAIMS_MAPPING: ${AUTHENTICATION_JWT_PRINCIPAL_CLAIMS_MAPPING:-[]}
+      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
+      AUTHENTICATION_CLIENT_TYPE: ${AUTHENTICATION_CLIENT_TYPE:-public}
+      
+      # JWT Configuration
+      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
+      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
+      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
+      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
 
   # ============================================================================
-  # OPENMETADATA - INGESTION (Airflow)
+  # OPENMETADATA - INGESTION
   # ============================================================================
   om-ingestion:
     container_name: dp_om_ingestion
-    image: docker.getcollate.io/openmetadata/ingestion:1.10.0-SNAPSHOT
+    image: openmetadata/ingestion:1.10.0
     depends_on:
       om-elasticsearch:
         condition: service_started
       om-mysql:
         condition: service_healthy
       om-server:
-        condition: service_healthy
-    environment:
-      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__OPENMETADATA_AIRFLOW_APIS__DAG_GENERATED_CONFIGS: "/opt/airflow/dag_generated_configs"
-      DB_HOST: ${AIRFLOW_DB_HOST:-om-mysql}
-      DB_PORT: ${AIRFLOW_DB_PORT:-3306}
-      AIRFLOW_DB: ${AIRFLOW_DB:-airflow_db}
-      DB_SCHEME: ${AIRFLOW_DB_SCHEME:-mysql+mysqldb}
-      DB_USER: ${AIRFLOW_DB_USER:-airflow_user}
-      DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_pass}
-      DB_PROPERTIES: ${AIRFLOW_DB_PROPERTIES:-}
+        condition: service_started
     entrypoint: /bin/bash
     command:
       - "/opt/airflow/ingestion_dependency.sh"
     expose:
       - 8080
     ports:
-      - "8081:8080"  # Changed to avoid conflict
+      - "8081:8080" # Mapped to 8081
     networks:
       - jadc2
     volumes:
       - om_ingestion_dag_config:/opt/airflow/dag_generated_configs
       - om_ingestion_dags:/opt/airflow/dags
       - om_ingestion_tmp:/tmp
+    environment:
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__OPENMETADATA_AIRFLOW_APIS__DAG_GENERATED_CONFIGS: "/opt/airflow/dag_generated_configs"
+      
+      # Database for Airflow (Updated HOST to om-mysql)
+      DB_HOST: om-mysql
+      DB_PORT: ${AIRFLOW_DB_PORT:-3306}
+      AIRFLOW_DB: ${AIRFLOW_DB:-airflow_db}
+      DB_SCHEME: ${AIRFLOW_DB_SCHEME:-mysql+mysqldb}
+      DB_USER: ${AIRFLOW_DB_USER:-airflow_user}
+      DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_pass}
+      DB_PROPERTIES: ${AIRFLOW_DB_PROPERTIES:-}
+
+      # OM Connection (Updated Endpoint to om-server)
+      AIRFLOW__OPENMETADATA_AIRFLOW_APIS__OPENMETADATA_API_ENDPOINT: http://om-server:8585/api
 
 # ============================================================================
 # VOLUMES
 # ============================================================================
 volumes:
+  # Existing volumes
   postgres_source_data:
   postgres_dest_data:
   kafka_data:
   namenode_data:
   datanode_data:
   hms_data:
+  
+  # OpenMetadata Volumes (Updated to match requested names)
   om_mysql_data:
   om_es_data:
   om_ingestion_dag_config:

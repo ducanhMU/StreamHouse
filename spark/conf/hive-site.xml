@@ -1,188 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
-<!--
-  spark/conf/hive-site.xml
-  Hive Metastore configuration for Spark integration with external HMS
--->
 <configuration>
-    <!-- Hive Metastore Connection -->
     <property>
         <name>hive.metastore.uris</name>
-        <value>thrift://hive-metastore:9083</value>
-        <description>
-            URI of the Hive Metastore Server. 
-            Points to the external HMS container for centralized metadata management.
-        </description>
+        <value>thrift://hms:9083</value>
+        <description>URI of the Hive Metastore Server</description>
     </property>
 
-    <!-- Metastore Database Connection (PostgreSQL Backend) -->
-    <property>
-        <name>javax.jdo.option.ConnectionURL</name>
-        <value>jdbc:postgresql://hms-db:5432/metastore</value>
-        <description>
-            JDBC connection string for the Hive Metastore database.
-            Uses PostgreSQL as the backend instead of Derby.
-        </description>
-    </property>
-
-    <property>
-        <name>javax.jdo.option.ConnectionDriverName</name>
-        <value>org.postgresql.Driver</value>
-        <description>JDBC driver class for PostgreSQL</description>
-    </property>
-
-    <property>
-        <name>javax.jdo.option.ConnectionUserName</name>
-        <value>hive</value>
-        <description>Database username for Metastore</description>
-    </property>
-
-    <property>
-        <name>javax.jdo.option.ConnectionPassword</name>
-        <value>hive</value>
-        <description>Database password for Metastore</description>
-    </property>
-
-    <!-- Warehouse Location (HDFS) -->
     <property>
         <name>hive.metastore.warehouse.dir</name>
         <value>hdfs://namenode:9000/user/hive/warehouse</value>
-        <description>
-            Default location for Hive tables in HDFS.
-            All managed tables will be stored under this directory.
-        </description>
     </property>
 
-    <!-- Schema Verification -->
-    <property>
-        <name>hive.metastore.schema.verification</name>
-        <value>false</value>
-        <description>
-            Disable strict schema verification to allow auto-upgrades.
-            Set to 'true' in production for safety.
-        </description>
-    </property>
-
-    <property>
-        <name>datanucleus.schema.autoCreateAll</name>
-        <value>true</value>
-        <description>
-            Auto-create metastore schema tables if they don't exist.
-            Useful for initial setup; disable in production.
-        </description>
-    </property>
-
-    <!-- Performance Tuning -->
-    <property>
-        <name>hive.metastore.client.socket.timeout</name>
-        <value>600</value>
-        <description>Metastore client socket timeout in seconds</description>
-    </property>
-
-    <property>
-        <name>hive.metastore.connect.retries</name>
-        <value>5</value>
-        <description>Number of retries on metastore connection failures</description>
-    </property>
-
-    <property>
-        <name>hive.metastore.failure.retries</name>
-        <value>3</value>
-        <description>Number of retries on metastore operation failures</description>
-    </property>
-
-    <!-- Thrift Server Configuration -->
-    <property>
-        <name>hive.metastore.thrift.connection.retries</name>
-        <value>3</value>
-        <description>Number of retries on Thrift connection failures</description>
-    </property>
-
-    <property>
-        <name>hive.metastore.thrift.max.message.size</name>
-        <value>1073741824</value>
-        <description>Maximum Thrift message size (1GB)</description>
-    </property>
-
-    <!-- Delta Lake Integration -->
     <property>
         <name>hive.metastore.disallow.incompatible.col.type.changes</name>
         <value>false</value>
-        <description>
-            Allow column type changes for Delta Lake schema evolution.
-            Delta handles schema changes internally.
-        </description>
-    </property>
-
-    <!-- Statistics Configuration -->
-    <property>
-        <name>hive.stats.autogather</name>
-        <value>true</value>
-        <description>Automatically gather table statistics</description>
     </property>
 
     <property>
-        <name>hive.stats.column.autogather</name>
-        <value>true</value>
-        <description>Automatically gather column statistics</description>
+        <name>hive.metastore.client.socket.timeout</name>
+        <value>600</value>
     </property>
-
-    <!-- Security (Basic) -->
     <property>
-        <name>hive.metastore.pre.event.listeners</name>
-        <value></value>
-        <description>Pre-event listeners for audit logging (empty for now)</description>
-    </property>
-
-    <property>
-        <name>hive.security.authorization.enabled</name>
-        <value>false</value>
-        <description>
-            Authorization disabled for development.
-            Enable in production with proper ACLs.
-        </description>
-    </property>
-
-    <!-- Execution Engine -->
-    <property>
-        <name>hive.execution.engine</name>
-        <value>spark</value>
-        <description>
-            Use Spark as the execution engine instead of MapReduce.
-            This is crucial for Spark-Hive integration.
-        </description>
-    </property>
-
-    <!-- Compatibility Settings -->
-    <property>
-        <name>hive.metastore.event.db.notification.api.auth</name>
-        <value>false</value>
-        <description>Disable authentication for event notifications</description>
-    </property>
-
-    <property>
-        <name>hive.metastore.metrics.enabled</name>
-        <value>true</value>
-        <description>Enable metastore metrics collection</description>
-    </property>
-
-    <!-- Connection Pool Configuration -->
-    <property>
-        <name>datanucleus.connectionPoolingType</name>
-        <value>HikariCP</value>
-        <description>Use HikariCP for better connection pooling</description>
-    </property>
-
-    <property>
-        <name>datanucleus.connectionPool.maxPoolSize</name>
-        <value>10</value>
-        <description>Maximum number of connections in the pool</description>
-    </property>
-
-    <!-- Logging -->
-    <property>
-        <name>hive.metastore.log4j2.properties</name>
-        <value>file:/opt/spark/conf/log4j2.properties</value>
-        <description>Path to log4j2 configuration</description>
+        <name>hive.metastore.connect.retries</name>
+        <value>5</value>
     </property>
 </configuration>
+
+

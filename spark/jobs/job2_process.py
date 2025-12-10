@@ -1,18 +1,13 @@
 """
 Spark Job 2: Silver to Gold Layer Processing
-============================================
-Reads cleaned data from Delta Lake (Silver Layer) and writes aggregated,
-denormalized views to Postgres (Gold Layer) for OLAP queries.
-
-Architecture: Silver Layer (HDFS/Delta) -> Gold Layer (Postgres OLAP)
-Processing: Batch/Micro-batch with windowing and aggregations
+Reads cleaned data from Delta Lake (Bronze Layer), casts types, performs aggregations,
+and writes to Postgres (Gold Layer).
 """
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
-from pyspark.sql.types import *
-from delta.tables import DeltaTable
+from pyspark.sql.types import DoubleType, IntegerType, TimestampType
 import logging
 
 # Configure logging
@@ -32,30 +27,58 @@ POSTGRES_PROPS = {
 }
 
 def create_spark_session():
-    """Initialize Spark session with Delta Lake and Postgres support"""
+    """Initialize Spark session with Delta Lake and Hive support"""
     return SparkSession.builder \
         .appName("JADC2-SilverToGold-Process") \
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+        .enableHiveSupport() \
         .getOrCreate()
 
-def read_delta_table(spark, table_name):
-    """Read Delta table from Silver layer"""
-    path = f"{HDFS_BASE}/{table_name}"
+def read_bronze_table(spark, table_name):  
+    """
+    Read from Bronze layer and Cast columns automatically.
+    Job 1 saves data as 'tablename_raw' in 'bronze' folder with all String types.
+    """
+    # Path matches Job 1 output
+    path = f"{HDFS_BASE}/bronze/{table_name}_raw"
     logger.info(f"Reading Delta table: {path}")
-    return spark.read.format("delta").load(path)
+    
+    try:
+        df = spark.read.format("delta").load(path)
+    except Exception as e:
+        logger.error(f"Table {table_name} not found at {path}. Job 1 might not have processed it yet.")
+        raise e
+    
+    # AUTO-CASTING: Convert columns from String to appropriate types for calculation
+    for col_name in df.columns:
+        # Numeric casting (Double)   
+        if any(x in col_name for x in ['lat', 'lon', 'speed', 'range', 'probability', 'health', 'supply', 'intensity', 'precipitation']):
+            df = df.withColumn(col_name, F.col(col_name).cast(DoubleType()))
+        # Integer casting
+        elif any(x in col_name for x in ['id', 'level', 'count']):
+            if col_name == 'id' or col_name.endswith('_id'):
+                df = df.withColumn(col_name, F.col(col_name).cast(IntegerType()))
+        # Timestamp casting
+        elif 'time' in col_name or 'created_at' in col_name or 'updated_at' in col_name:
+             df = df.withColumn(col_name, F.col(col_name).cast(TimestampType()))
+             
+    return df
 
 def write_to_postgres(df, table_name, mode="overwrite"):
-    """Write DataFrame to Postgres with upsert capability"""
+    """Write DataFrame to Postgres"""
     logger.info(f"Writing to Postgres table: gold.{table_name} (mode: {mode})")
-    df.write \
-        .jdbc(
-            url=POSTGRES_URL,
-            table=f"gold.{table_name}",
-            mode=mode,
-            properties=POSTGRES_PROPS
-        )
-    logger.info(f"Successfully wrote {df.count()} rows to gold.{table_name}")
+    try:
+        df.write \
+            .jdbc(
+                url=POSTGRES_URL,
+                table=f"gold.{table_name}",
+                mode=mode,
+                properties=POSTGRES_PROPS
+            )
+        logger.info(f"Successfully wrote rows to gold.{table_name}")
+    except Exception as e:
+        logger.error(f"Failed to write to Postgres: {e}")
 
 def calculate_haversine_distance(lat1, lon1, lat2, lon2):
     """Calculate distance between two points using Haversine formula (in km)"""
@@ -73,65 +96,44 @@ def calculate_haversine_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 def process_effective_unit_strength(spark):
-    """
-    Gold Table: effective_unit_strength
-    Calculate terrain/weather-adjusted combat effectiveness
-    """
+    """Gold Table: effective_unit_strength"""
     logger.info("Processing effective_unit_strength...")
     
-    # Read Silver tables
-    units = read_delta_table(spark, "units")
-    weapons = read_delta_table(spark, "weapons")
-    regions = read_delta_table(spark, "regions")
-    weather = read_delta_table(spark, "weather_events")
-    unit_status = read_delta_table(spark, "unit_status_updates")
+    units = read_bronze_table(spark, "units")
+    weapons = read_bronze_table(spark, "weapons")
+    regions = read_bronze_table(spark, "regions")
+    weather = read_bronze_table(spark, "weather_events")
+    unit_status = read_bronze_table(spark, "unit_status_updates")
     
-    # Get latest weather per region using window function
+    # Latest Weather
     weather_window = Window.partitionBy("region_id").orderBy(F.col("event_time").desc())
-    latest_weather = weather.withColumn("rn", F.row_number().over(weather_window)) \
-        .filter(F.col("rn") == 1) \
-        .drop("rn")
+    latest_weather = weather.withColumn("rn", F.row_number().over(weather_window)).filter(F.col("rn") == 1).drop("rn")
     
-    # Get latest unit status
+    # Latest Unit Status
     status_window = Window.partitionBy("unit_id").orderBy(F.col("event_time").desc())
-    latest_status = unit_status.withColumn("rn", F.row_number().over(status_window)) \
-        .filter(F.col("rn") == 1) \
-        .drop("rn")
+    latest_status = unit_status.withColumn("rn", F.row_number().over(status_window)).filter(F.col("rn") == 1).drop("rn")
     
-    # Join all tables
+    # Join
     result = latest_status \
         .join(weapons, latest_status.unit_id == weapons.unit_id, "left") \
         .join(regions, latest_status.region_id == regions.id, "left") \
         .join(latest_weather, latest_status.region_id == latest_weather.region_id, "left")
     
-    # Calculate terrain factor
+    # Calculations
     result = result.withColumn("terrain_factor",
         F.when(F.col("terrain_type") == "mountain", 0.8)
          .when(F.col("terrain_type") == "swamp", 0.7)
          .when(F.col("terrain_type") == "desert", 0.9)
          .otherwise(1.0)
-    )
-    
-    # Calculate effective range (terrain + wind impact)
-    result = result.withColumn("effective_range_km",
-        F.col("range_km") * F.col("terrain_factor") * 
-        (1 - 0.1 * F.coalesce(F.col("wind_speed_kmh"), F.lit(0)) / 100)
-    )
-    
-    # Calculate adjusted hit probability (weather impacts)
-    result = result.withColumn("adjusted_hit_probability",
-        F.col("hit_probability") * 
-        (1 - 0.15 * F.coalesce(F.col("precipitation_mm"), F.lit(0)) / 100) *
-        (1 - 0.2 * F.coalesce(F.col("intensity"), F.lit(0)) * 
-         F.when(F.col("type") == "fog", 1).otherwise(0))
-    )
-    
-    # Calculate attacking strength
-    result = result.withColumn("attacking_strength",
+    ).withColumn("effective_range_km",
+        F.col("range_km") * F.col("terrain_factor") * (1 - 0.1 * F.coalesce(F.col("wind_speed_kmh"), F.lit(0)) / 100)
+    ).withColumn("adjusted_hit_probability",
+        F.col("hit_probability") * (1 - 0.15 * F.coalesce(F.col("precipitation_mm"), F.lit(0)) / 100) *
+        (1 - 0.2 * F.coalesce(F.col("intensity"), F.lit(0)) * F.when(F.col("type") == "fog", 1).otherwise(0))
+    ).withColumn("attacking_strength",
         F.col("adjusted_hit_probability") * F.col("health_percent") / 100
     )
     
-    # Select final columns
     gold_df = result.select(
         latest_status.unit_id,
         latest_status.region_id,
@@ -144,106 +146,65 @@ def process_effective_unit_strength(spark):
     )
     
     write_to_postgres(gold_df, "effective_unit_strength")
-    return gold_df
 
 def process_threat_assessment(spark):
-    """
-    Gold Table: threat_assessment
-    Threat prioritization with weather and EW adjustments
-    """
+    """Gold Table: threat_assessment"""
     logger.info("Processing threat_assessment...")
     
-    # Read Silver tables
-    targets = read_delta_table(spark, "targets")
-    detections = read_delta_table(spark, "detections")
-    sensors = read_delta_table(spark, "sensors")
-    units = read_delta_table(spark, "units")
-    unit_status = read_delta_table(spark, "unit_status_updates")
-    weather = read_delta_table(spark, "weather_events")
-    ew_events = read_delta_table(spark, "cyber_ew_events")
+    targets = read_bronze_table(spark, "targets")
+    detections = read_bronze_table(spark, "detections")
+    sensors = read_bronze_table(spark, "sensors")
+    units = read_bronze_table(spark, "units")
+    unit_status = read_bronze_table(spark, "unit_status_updates")
+    weather = read_bronze_table(spark, "weather_events")
+    ew_events = read_bronze_table(spark, "cyber_ew_events")
     
-    # Get latest detection per target
-    detection_window = Window.partitionBy("target_id").orderBy(F.col("event_time").desc())
-    latest_detections = detections.withColumn("rn", F.row_number().over(detection_window)) \
-        .filter(F.col("rn") == 1) \
-        .drop("rn")
+    # Latest Detections
+    det_window = Window.partitionBy("target_id").orderBy(F.col("event_time").desc())
+    latest_detections = detections.withColumn("rn", F.row_number().over(det_window)).filter(F.col("rn") == 1).drop("rn")
     
-    # Join with targets
-    result = latest_detections.join(targets, latest_detections.target_id == targets.id)
-    
-    # Join with sensors and units to get unit position
-    result = result \
+    result = latest_detections.join(targets, latest_detections.target_id == targets.id) \
         .join(sensors, latest_detections.sensor_id == sensors.id, "left") \
         .join(units, sensors.unit_id == units.id, "left")
     
-    # Get latest unit position
+    # Latest Unit Pos
     status_window = Window.partitionBy("unit_id").orderBy(F.col("event_time").desc())
-    latest_unit_pos = unit_status.withColumn("rn", F.row_number().over(status_window)) \
-        .filter(F.col("rn") == 1) \
-        .select("unit_id", "lat", "lon", "event_time") \
-        .withColumnRenamed("lat", "unit_lat") \
-        .withColumnRenamed("lon", "unit_lon") \
-        .withColumnRenamed("event_time", "unit_event_time") \
-        .drop("rn")
+    latest_unit_pos = unit_status.withColumn("rn", F.row_number().over(status_window)).filter(F.col("rn") == 1) \
+        .select(F.col("unit_id"), F.col("lat").alias("unit_lat"), F.col("lon").alias("unit_lon")).drop("rn")
     
     result = result.join(latest_unit_pos, sensors.unit_id == latest_unit_pos.unit_id, "left")
     
-    # Calculate distance
+    # Distance
     result = result.withColumn("distance_km",
-        F.when(F.col("unit_lat").isNotNull() & F.col("unit_lon").isNotNull(),
-            calculate_haversine_distance(
-                F.col("unit_lat"), F.col("unit_lon"),
-                latest_detections.lat, latest_detections.lon
-            )
-        ).otherwise(F.lit(1e9))  # Large value if position unknown
+        F.when(F.col("unit_lat").isNotNull(),
+            calculate_haversine_distance(F.col("unit_lat"), F.col("unit_lon"), latest_detections.lat, latest_detections.lon)
+        ).otherwise(F.lit(999999.0))
     )
     
-    # Get latest weather for region
+    # Weather & EW joins
     weather_window = Window.partitionBy("region_id").orderBy(F.col("event_time").desc())
-    latest_weather = weather.withColumn("rn", F.row_number().over(weather_window)) \
-        .filter(F.col("rn") == 1) \
-        .drop("rn")
+    latest_weather = weather.withColumn("rn", F.row_number().over(weather_window)).filter(F.col("rn") == 1).drop("rn")
     
-    result = result.join(latest_weather, 
-        latest_detections.region_id == latest_weather.region_id, "left")
-    
-    # Get latest EW event for sensor
     ew_window = Window.partitionBy("target_sensor_id").orderBy(F.col("event_time").desc())
-    latest_ew = ew_events.withColumn("rn", F.row_number().over(ew_window)) \
-        .filter(F.col("rn") == 1) \
-        .drop("rn")
+    latest_ew = ew_events.withColumn("rn", F.row_number().over(ew_window)).filter(F.col("rn") == 1).drop("rn")
     
-    result = result.join(latest_ew, 
-        latest_detections.sensor_id == latest_ew.target_sensor_id, "left")
+    result = result.join(latest_weather, latest_detections.region_id == latest_weather.region_id, "left") \
+                   .join(latest_ew, latest_detections.sensor_id == latest_ew.target_sensor_id, "left")
     
-    # Calculate adjusted confidence
+    # Threat logic
     result = result.withColumn("adjusted_confidence",
-        latest_detections.confidence * 
-        (1 - 0.3 * F.coalesce(latest_weather.intensity, F.lit(0)) * 
-         F.when(F.col("type").isin("fog", "storm"), 1).otherwise(0)) *
+        latest_detections.confidence * (1 - 0.3 * F.coalesce(latest_weather.intensity, F.lit(0)) * F.when(F.col("type").isin("fog", "storm"), 1).otherwise(0)) *
         (1 - 0.5 * F.when(F.col("effect") == "jammed", 1).otherwise(0))
+    ).withColumn("predicted_threat",
+        F.when(((latest_detections.speed_kmh > 500) | (targets.iff_status == "foe")) & (F.col("adjusted_confidence") > 0.8), "high").otherwise("medium")
+    ).withColumn("response_time_sec",
+        F.when(F.col("distance_km") < 999999,
+            (F.col("distance_km") / F.when(latest_detections.speed_kmh > 0, latest_detections.speed_kmh).otherwise(1)) * 3600
+        ).otherwise(999999.0)
     )
     
-    # Predict threat level
-    result = result.withColumn("predicted_threat",
-        F.when(
-            ((latest_detections.speed_kmh > 500) | (targets.iff_status == "foe")) & 
-            (F.col("adjusted_confidence") > 0.8),
-            F.lit("high")
-        ).otherwise(F.lit("medium"))
-    )
-    
-    # Calculate response time
-    result = result.withColumn("response_time_sec",
-        F.when(F.col("distance_km") < 1e9,
-            (F.col("distance_km") / F.when(latest_detections.speed_kmh > 0, 
-                latest_detections.speed_kmh).otherwise(F.lit(1))) * 3600
-        ).otherwise(F.lit(1e9))
-    )
-    
-    # Select final columns
     gold_df = result.select(
-        targets.target_id,
+        targets.id.alias("target_id"),
         latest_detections.region_id,
         targets.iff_status,
         F.col("adjusted_confidence"),
@@ -254,47 +215,25 @@ def process_threat_assessment(spark):
     )
     
     write_to_postgres(gold_df, "threat_assessment")
-    return gold_df
 
 def process_alerts_with_commands(spark):
-    """
-    Gold Table: alerts_with_commands
-    Alerts joined with authorized C2 actions
-    """
+    """Gold Table: alerts_with_commands"""
     logger.info("Processing alerts_with_commands...")
     
-    # Read Silver tables
-    alerts = read_delta_table(spark, "alerts")
-    commands = read_delta_table(spark, "commands")
-    detections = read_delta_table(spark, "detections")
-    users = read_delta_table(spark, "users")
+    alerts = read_bronze_table(spark, "alerts")
+    commands = read_bronze_table(spark, "commands")
+    detections = read_bronze_table(spark, "detections")
+    users = read_bronze_table(spark, "users")
     
-    # Filter high/critical alerts
     high_alerts = alerts.filter(F.col("threat_level").isin("high", "critical"))
     
-    # Join with detections to get region
-    result = high_alerts.join(detections, high_alerts.detection_id == detections.id)
+    result = high_alerts.join(detections, high_alerts.detection_id == detections.id) \
+        .join(commands, high_alerts.id == commands.alert_id, "left") \
+        .join(users, commands.user_id == users.id, "left")
     
-    # Join with commands
-    result = result.join(commands, high_alerts.id == commands.alert_id, "left")
+    result = result.withColumn("action", F.when(users.role == "commander", commands.action).otherwise(F.lit(None))) \
+        .withColumn("event_time", F.greatest(high_alerts.created_at, F.coalesce(commands.event_time, high_alerts.created_at)))
     
-    # Join with users to filter commanders only
-    result = result.join(users, commands.user_id == users.id, "left")
-    
-    # Add action only if user is commander
-    result = result.withColumn("action",
-        F.when(users.role == "commander", commands.action).otherwise(F.lit(None))
-    )
-    
-    # Calculate latest event time
-    result = result.withColumn("event_time",
-        F.greatest(
-            high_alerts.created_at,
-            F.coalesce(commands.event_time, high_alerts.created_at)
-        )
-    )
-    
-    # Select final columns
     gold_df = result.select(
         high_alerts.id.alias("alert_id"),
         high_alerts.detection_id,
@@ -307,78 +246,35 @@ def process_alerts_with_commands(spark):
     ).distinct()
     
     write_to_postgres(gold_df, "alerts_with_commands")
-    return gold_df
 
 def process_logistics_readiness(spark):
-    """
-    Gold Table: logistics_readiness
-    Supply feasibility under weather/terrain constraints
-    """
+    """Gold Table: logistics_readiness"""
     logger.info("Processing logistics_readiness...")
     
-    # Read Silver tables
-    supply_status = read_delta_table(spark, "supply_status")
-    regions = read_delta_table(spark, "regions")
-    weather = read_delta_table(spark, "weather_events")
-    unit_status = read_delta_table(spark, "unit_status_updates")
+    supply_status = read_bronze_table(spark, "supply_status")
+    regions = read_bronze_table(spark, "regions")
+    weather = read_bronze_table(spark, "weather_events")
+    unit_status = read_bronze_table(spark, "unit_status_updates")
     
-    # Get latest supply status per unit
-    supply_window = Window.partitionBy("unit_id").orderBy(F.col("event_time").desc())
-    latest_supply = supply_status.withColumn("rn", F.row_number().over(supply_window)) \
-        .filter(F.col("rn") == 1) \
-        .drop("rn")
+    supply_win = Window.partitionBy("unit_id").orderBy(F.col("event_time").desc())
+    latest_supply = supply_status.withColumn("rn", F.row_number().over(supply_win)).filter(F.col("rn") == 1).drop("rn")
     
-    # Get latest unit status to determine current region
-    status_window = Window.partitionBy("unit_id").orderBy(F.col("event_time").desc())
-    latest_unit = unit_status.withColumn("rn", F.row_number().over(status_window)) \
-        .filter(F.col("rn") == 1) \
-        .drop("rn")
+    status_win = Window.partitionBy("unit_id").orderBy(F.col("event_time").desc())
+    latest_unit = unit_status.withColumn("rn", F.row_number().over(status_win)).filter(F.col("rn") == 1).drop("rn")
     
-    # Join supply with current unit location
-    result = latest_supply.join(latest_unit, latest_supply.unit_id == latest_unit.unit_id)
+    result = latest_supply.join(latest_unit, "unit_id").join(regions, latest_unit.region_id == regions.id)
     
-    # Join with regions
-    result = result.join(regions, latest_unit.region_id == regions.id)
-    
-    # Get latest weather for region
-    weather_window = Window.partitionBy("region_id").orderBy(F.col("event_time").desc())
-    latest_weather = weather.withColumn("rn", F.row_number().over(weather_window)) \
-        .filter(F.col("rn") == 1) \
-        .drop("rn")
+    weather_win = Window.partitionBy("region_id").orderBy(F.col("event_time").desc())
+    latest_weather = weather.withColumn("rn", F.row_number().over(weather_win)).filter(F.col("rn") == 1).drop("rn")
     
     result = result.join(latest_weather, latest_unit.region_id == latest_weather.region_id, "left")
+    result = result.withColumn("terrain_factor", F.when(F.col("terrain_type") == "mountain", 0.7).otherwise(1.0)) \
+        .withColumn("projected_supply",
+            latest_supply.supply_level * (1 - 0.5 * F.coalesce(latest_weather.intensity, F.lit(0)) * F.when(F.col("type").isin("storm", "rain"), 1).otherwise(0) * F.col("terrain_factor"))
+        ).withColumn("resupply_feasibility",
+            F.when((F.coalesce(latest_weather.wind_speed_kmh, F.lit(0)) > 50) | (F.coalesce(latest_weather.precipitation_mm, F.lit(0)) > 10), 0).otherwise(1)
+        ).withColumn("event_time", F.greatest(latest_supply.event_time, F.coalesce(latest_weather.event_time, latest_supply.event_time)))
     
-    # Calculate terrain factor
-    result = result.withColumn("terrain_factor",
-        F.when(F.col("terrain_type") == "mountain", 0.7).otherwise(1.0)
-    )
-    
-    # Calculate projected supply with weather/terrain impacts
-    result = result.withColumn("projected_supply",
-        latest_supply.supply_level * 
-        (1 - 0.5 * F.coalesce(latest_weather.intensity, F.lit(0)) * 
-         F.when(F.col("type").isin("storm", "rain"), 1).otherwise(0) * 
-         F.col("terrain_factor"))
-    )
-    
-    # Calculate resupply feasibility
-    result = result.withColumn("resupply_feasibility",
-        F.when(
-            (F.coalesce(latest_weather.wind_speed_kmh, F.lit(0)) > 50) | 
-            (F.coalesce(latest_weather.precipitation_mm, F.lit(0)) > 10),
-            0
-        ).otherwise(1)
-    )
-    
-    # Calculate event time
-    result = result.withColumn("event_time",
-        F.greatest(
-            latest_supply.event_time,
-            F.coalesce(latest_weather.event_time, latest_supply.event_time)
-        )
-    )
-    
-    # Select final columns
     gold_df = result.select(
         latest_supply.unit_id,
         latest_unit.region_id,
@@ -387,91 +283,42 @@ def process_logistics_readiness(spark):
         F.col("resupply_feasibility"),
         F.col("event_time")
     )
-    
     write_to_postgres(gold_df, "logistics_readiness")
-    return gold_df
 
 def process_engagement_analysis(spark):
-    """
-    Gold Table: engagement_analysis
-    After-action review with terrain/weather/EW context
-    """
+    """Gold Table: engagement_analysis"""
     logger.info("Processing engagement_analysis...")
     
-    # Read Silver tables
-    engagements = read_delta_table(spark, "engagement_events")
-    unit_status = read_delta_table(spark, "unit_status_updates")
-    regions = read_delta_table(spark, "regions")
-    weather = read_delta_table(spark, "weather_events")
-    ew_events = read_delta_table(spark, "cyber_ew_events")
-    weapons = read_delta_table(spark, "weapons")
+    engagements = read_bronze_table(spark, "engagement_events")
+    unit_status = read_bronze_table(spark, "unit_status_updates")
+    regions = read_bronze_table(spark, "regions")
+    weather = read_bronze_table(spark, "weather_events")
+    ew_events = read_bronze_table(spark, "cyber_ew_events")
+    weapons = read_bronze_table(spark, "weapons")
     
-    # For each engagement, find attacker's region at time of engagement
-    # Using window to get closest unit status update before engagement
-    result = engagements.alias("eng")
+    # Find region at time of engagement
+    unit_with_time = unit_status.alias("us").join(engagements.alias("eng2"), (unit_status.unit_id == engagements.attacker_id) & (unit_status.event_time <= engagements.event_time))
+    status_win = Window.partitionBy("eng2.id").orderBy(F.col("us.event_time").desc())
+    closest_status = unit_with_time.withColumn("rn", F.row_number().over(status_win)).filter(F.col("rn") == 1).select(F.col("eng2.id").alias("engagement_id"), F.col("us.region_id"))
     
-    # Get unit status closest to engagement time
-    unit_with_time = unit_status.alias("us").join(
-        engagements.alias("eng2"),
-        (unit_status.unit_id == engagements.attacker_id) &
-        (unit_status.event_time <= engagements.event_time),
-        "inner"
-    )
+    result = engagements.alias("eng").join(closest_status, F.col("eng.id") == closest_status.engagement_id, "left") \
+        .join(regions, closest_status.region_id == regions.id, "left") \
+        .join(weapons, F.col("eng.weapon_id") == weapons.id, "left")
+        
+    weather_joined = result.join(weather.alias("w"), (closest_status.region_id == weather.region_id) & (weather.event_time <= result.event_time), "left")
+    weather_win = Window.partitionBy("eng.id").orderBy(F.col("w.event_time").desc())
+    closest_weather = weather_joined.withColumn("rn", F.row_number().over(weather_win)).filter((F.col("rn") == 1) | F.col("w.id").isNull()).drop("rn")
     
-    status_window = Window.partitionBy("eng2.id").orderBy(F.col("us.event_time").desc())
-    closest_status = unit_with_time.withColumn("rn", F.row_number().over(status_window)) \
-        .filter(F.col("rn") == 1) \
-        .select(
-            F.col("eng2.id").alias("engagement_id"),
-            F.col("us.region_id")
-        )
+    ew_joined = closest_weather.join(ew_events.alias("ew"), (ew_events.event_time <= result.event_time) & (F.abs(F.unix_timestamp(ew_events.event_time) - F.unix_timestamp(result.event_time)) < 300), "left")
     
-    result = result.join(closest_status, result.id == closest_status.engagement_id, "left")
-    
-    # Join with regions
-    result = result.join(regions, closest_status.region_id == regions.id, "left")
-    
-    # Join with weapons
-    result = result.join(weapons, result.weapon_id == weapons.id, "left")
-    
-    # Get weather at engagement time and region
-    weather_joined = result.join(
-        weather.alias("w"),
-        (closest_status.region_id == weather.region_id) &
-        (weather.event_time <= result.event_time),
-        "left"
-    )
-    
-    weather_window = Window.partitionBy("eng.id").orderBy(F.col("w.event_time").desc())
-    closest_weather = weather_joined.withColumn("rn", F.row_number().over(weather_window)) \
-        .filter((F.col("rn") == 1) | F.col("w.id").isNull()) \
-        .drop("rn")
-    
-    # Get EW events affecting the engagement
-    ew_joined = closest_weather.join(
-        ew_events.alias("ew"),
-        (ew_events.event_time <= result.event_time) &
-        (F.abs(F.unix_timestamp(ew_events.event_time) - F.unix_timestamp(result.event_time)) < 300),  # Within 5 minutes
-        "left"
-    )
-    
-    # Calculate adjusted hit probability
-    result_final = ew_joined.withColumn("adjusted_hit_probability",
-        weapons.hit_probability * 
-        (1 - 0.2 * F.coalesce(F.col("w.intensity"), F.lit(0)) * 
-         F.when(F.col("w.type") == "fog", 1).otherwise(0)) *
+    final_df = ew_joined.withColumn("adjusted_hit_probability",
+        weapons.hit_probability * (1 - 0.2 * F.coalesce(F.col("w.intensity"), F.lit(0)) * F.when(F.col("w.type") == "fog", 1).otherwise(0)) *
         (1 - 0.3 * F.when(F.col("ew.effect") == "jammed", 1).otherwise(0))
-    )
-    
-    # Calculate impact factor
-    result_final = result_final.withColumn("impact_factor",
+    ).withColumn("impact_factor",
         (1 - 0.2 * F.when(F.col("w.type") == "fog", 1).otherwise(0)) *
         (1 - 0.3 * F.when(F.col("ew.effect") == "jammed", 1).otherwise(0)) *
         F.when(regions.terrain_type == "mountain", 0.8).otherwise(1.0)
-    )
-    
-    # Select final columns
-    gold_df = result_final.select(
+    ).select(
         F.col("eng.id").alias("engagement_id"),
         F.col("eng.attacker_id"),
         F.col("eng.target_id"),
@@ -483,40 +330,19 @@ def process_engagement_analysis(spark):
         F.col("eng.event_time")
     ).distinct()
     
-    write_to_postgres(gold_df, "engagement_analysis")
-    return gold_df
+    write_to_postgres(final_df, "engagement_analysis")
 
 def main():
-    """Main processing pipeline"""
     logger.info("Starting Silver to Gold ETL job...")
-    
-    # Create Spark session
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
-    
     try:
-        # Process all Gold tables
-        logger.info("=" * 60)
         process_effective_unit_strength(spark)
-        
-        logger.info("=" * 60)
         process_threat_assessment(spark)
-        
-        logger.info("=" * 60)
         process_alerts_with_commands(spark)
-        
-        logger.info("=" * 60)
         process_logistics_readiness(spark)
-        
-        logger.info("=" * 60)
         process_engagement_analysis(spark)
-        
-        logger.info("=" * 60)
         logger.info("All Gold tables processed successfully!")
-        
-    except Exception as e:
-        logger.error(f"Error in processing: {str(e)}", exc_info=True)
-        raise
     finally:
         spark.stop()
 
