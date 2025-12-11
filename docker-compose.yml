@@ -404,7 +404,7 @@ services:
       # Bind rõ ràng để tránh lỗi network
       - SPARK_MASTER_HOST=spark-master
     volumes:
-      - ./jobs:/opt/spark/jobs:ro
+      - ./spark/jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
       - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
     # SỬA LỖI: Chạy class Master thay vì tail -f
@@ -429,6 +429,7 @@ services:
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
     volumes:
+      - ./spark/jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
       - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
     # SỬA LỖI: Chạy class Worker và trỏ về Master
@@ -455,7 +456,7 @@ services:
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
     volumes:
-      - ./jobs:/opt/spark/jobs:ro
+      - ./spark/jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
       - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
     command:
@@ -493,9 +494,11 @@ services:
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
     volumes:
-      - ./jobs:/opt/spark/jobs:ro
+      - ./spark/jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
       - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      # 👇 THÊM DÒNG NÀY: Mount thư mục scripts vào container
+      - ./spark/scripts:/opt/spark/scripts:ro 
     command:
       - bash
       - -c
@@ -506,14 +509,16 @@ services:
         echo 'Waiting for Postgres Destination...'
         while ! nc -z postgres-dest 5432; do sleep 2; done
 
-        echo 'Waiting for Data (Bronze Table: units_raw)...'
-      
-        until /opt/spark/bin/hdfs dfs -test -e hdfs://namenode:9000/data/delta/bronze/units_raw/_delta_log; do
-          echo 'Bronze tables (delta log) not found. Sleeping 20s...'
+        echo 'Checking Data Availability (Silver Layer)...'
+        
+        # 👇 ĐOẠN SỬA: Dùng spark-submit chạy script python để check path
+        # Lưu ý: Đổi path kiểm tra sang 'silver/regions' vì Job 1 viết vào silver
+        until /opt/spark/bin/spark-submit --master local[*] /opt/spark/scripts/check_hdfs_path.py "hdfs://namenode:9000/data/delta/silver/regions/_delta_log"; do
+          echo 'Silver data not found yet. Sleeping 20s...'
           sleep 20
         done
-       
-        echo 'Submitting Processing Job...'
+        
+        echo 'Data Found! Submitting Processing Job...'
         /opt/spark/bin/spark-submit \
           --master spark://spark-master:7077 \
           --name 'Job2_Process_HDFS_To_Postgres' \

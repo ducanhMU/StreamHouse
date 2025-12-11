@@ -3,11 +3,15 @@ from pyspark.sql.functions import col, from_json, current_timestamp, get_json_ob
 from pyspark.sql.types import *
 from delta import DeltaTable
 import logging
+import time
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger("JADC2_Direct_To_Silver")
 
 KAFKA_BOOTSTRAP = "kafka:9092"
@@ -138,7 +142,7 @@ def get_schema(table_name):
         ]),
         "roe_updates": StructType([
             StructField("id", StringType(), True),
-            StructField("rules", StringType(), True), # JSONB treated as String
+            StructField("rules", StringType(), True),
             StructField("event_time", TimestampType(), True)
         ]),
         "alerts": StructType([
@@ -166,6 +170,7 @@ def get_schema(table_name):
 def process_stream(spark, table_name, schema):
     topic_name = f"{TOPIC_PREFIX}.{table_name}"
     delta_path = f"{HDFS_BASE_PATH}/{table_name}"
+    checkpoint_dir = f"{HDFS_BASE_PATH}/_checkpoints/{table_name}"
     
     logger.info(f"Starting ingestion for: {table_name}")
 
@@ -180,7 +185,6 @@ def process_stream(spark, table_name, schema):
         .load())
 
     # 2. Parse & Transform (Direct to Silver)
-    # Extract 'after' field from Debezium JSON and parse it using the strict Silver Schema
     parsed_stream = (raw_stream
         .select(
             get_json_object(expr("CAST(value AS STRING)"), "$.after").alias("after_json"),
@@ -192,37 +196,51 @@ def process_stream(spark, table_name, schema):
         .withColumn("update_timestamp", current_timestamp()) # System processing time
     )
 
-    # 3. Upsert Logic (Merge)
+    # 3. Upsert Logic (Merge) - LOGGING ADDED HERE
     def upsert_to_delta(batch_df, batch_id):
-        if batch_df.isEmpty():
-            return
-        
-        # Deduplicate within the micro-batch based on ID
-        batch_df = batch_df.dropDuplicates(["id"])
+        start_time = time.time()
+        try:
+            if batch_df.isEmpty():
+                return
+            
+            # --- CRITICAL FIX: Use session from batch_df ---
+            _spark = batch_df.sparkSession
+            
+            # Count records for logging (Workload Tracking)
+            record_count = batch_df.count()
 
-        if DeltaTable.isDeltaTable(spark, delta_path):
-            target_table = DeltaTable.forPath(spark, delta_path)
-            (target_table.alias("target")
-                .merge(batch_df.alias("source"), "target.id = source.id")
-                .whenMatchedUpdateAll()
-                .whenNotMatchedInsertAll()
-                .execute())
-        else:
-            # First write: create the table
-            logger.info(f"Creating new Delta table for: {table_name}")
-            batch_df.write \
-                .format("delta") \
-                .mode("append") \
-                .option("path", delta_path) \
-                .saveAsTable(f"default.{table_name}")
+            # Deduplicate within the micro-batch based on ID
+            batch_df = batch_df.dropDuplicates(["id"])
+
+            if DeltaTable.isDeltaTable(_spark, delta_path):
+                target_table = DeltaTable.forPath(_spark, delta_path)
+                (target_table.alias("target")
+                    .merge(batch_df.alias("source"), "target.id = source.id")
+                    .whenMatchedUpdateAll()
+                    .whenNotMatchedInsertAll()
+                    .execute())
+            else:
+                # First write: create the table
+                logger.info(f"Creating new Delta table for: {table_name}")
+                batch_df.write \
+                    .format("delta") \
+                    .mode("append") \
+                    .option("path", delta_path) \
+                    .saveAsTable(f"default.{table_name}")
+            
+            # Calculate duration and Log Workload
+            duration = time.time() - start_time
+            logger.info(f"SUCCESS [{table_name}] Batch: {batch_id} | Records: {record_count} | Duration: {duration:.2f}s")
+
+        except Exception as e:
+            logger.error(f"CRITICAL ERROR in batch {batch_id} for table {table_name}: {e}")
+            raise e
 
     # 4. Start Streaming Query
-    checkpoint_dir = f"{HDFS_BASE_PATH}/_checkpoints/{table_name}"
-    
     return (parsed_stream.writeStream
         .foreachBatch(upsert_to_delta)
         .option("checkpointLocation", checkpoint_dir)
-        .trigger(processingTime="10 seconds")
+        .trigger(processingTime="1 minute")
         .start())
 
 # ==========================================

@@ -9,11 +9,15 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from pyspark.sql.types import DoubleType, IntegerType, TimestampType
 import logging
+import time
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger("JADC2_SilverToGold")
 
 # Input: Silver Layer (Delta Lake)
@@ -42,18 +46,31 @@ def read_silver(spark, table_name):
     return spark.read.format("delta").load(path)
 
 def write_gold(df, table_name):
-    """Writes a Gold DataFrame to PostgreSQL."""
-    logger.info(f"Writing {df.count()} rows to Gold Table: gold.{table_name}")
-    
-    # Write mode is Append (or Overwrite depending on requirement). 
-    # For reporting tables, usually Overwrite specific partitions or Append new events.
-    # Here we use Overwrite for simplicity of the snapshot view.
-    df.write.jdbc(
-        url=POSTGRES_URL,
-        table=f"gold.{table_name}",
-        mode="overwrite", 
-        properties=POSTGRES_PROPS
-    )
+    """Writes a Gold DataFrame to PostgreSQL with logging."""
+    start_time = time.time()
+    try:
+        # Cache DataFrame to prevent re-calculation between count and write
+        df.cache()
+        
+        count = df.count()
+        logger.info(f"Writing {count} rows to Gold Table: gold.{table_name}...")
+        
+        # Write to Postgres (Overwrite mode for snapshot tables)
+        df.write.jdbc(
+            url=POSTGRES_URL,
+            table=f"gold.{table_name}",
+            mode="overwrite", 
+            properties=POSTGRES_PROPS
+        )
+        
+        duration = time.time() - start_time
+        logger.info(f"SUCCESS [{table_name}] Written: {count} rows | Duration: {duration:.2f}s")
+        
+        df.unpersist()
+        
+    except Exception as e:
+        logger.error(f"FAILED [{table_name}] Error: {e}")
+        raise e
 
 def get_latest_snapshot(df, group_cols, time_col="event_time"):
     """Helper to get the most recent record for each ID (deduplication)."""
@@ -106,22 +123,21 @@ def process_effective_unit_strength(spark):
         .join(latest_weather.alias("we"), F.col("s.region_id") == F.col("we.region_id"), "left")
 
     # 4. Calculations
-    # Handle Nulls for weather using coalesce
     wind = F.coalesce(F.col("we.wind_speed_kmh"), F.lit(0)).cast(DoubleType())
     precip = F.coalesce(F.col("we.precipitation_mm"), F.lit(0)).cast(DoubleType())
     intensity = F.coalesce(F.col("we.intensity"), F.lit(0)).cast(DoubleType())
     
     df = df.withColumn("terrain_factor", 
-        F.when(F.col("r.terrain_type") == "mountain", 0.8)
-         .when(F.col("r.terrain_type") == "swamp", 0.7)
-         .otherwise(1.0)
-    ).withColumn("effective_range_km", 
-        F.col("w.range_km").cast(DoubleType()) * F.col("terrain_factor") * (1 - 0.1 * wind / 100)
-    ).withColumn("adjusted_hit_probability",
-        F.col("w.hit_probability").cast(DoubleType()) * (1 - 0.15 * precip) * (1 - 0.2 * intensity * F.when(F.col("we.type") == "fog", 1).otherwise(0))
-    ).withColumn("attacking_strength",
-        F.col("adjusted_hit_probability") * F.col("s.health_percent") / 100
-    )
+            F.when(F.col("r.terrain_type") == "mountain", 0.8)
+             .when(F.col("r.terrain_type") == "swamp", 0.7)
+             .otherwise(1.0)
+        ).withColumn("effective_range_km", 
+            F.col("w.range_km").cast(DoubleType()) * F.col("terrain_factor") * (1 - 0.1 * wind / 100)
+        ).withColumn("adjusted_hit_probability",
+            F.col("w.hit_probability").cast(DoubleType()) * (1 - 0.15 * precip) * (1 - 0.2 * intensity * F.when(F.col("we.type") == "fog", 1).otherwise(0))
+        ).withColumn("attacking_strength",
+            F.col("adjusted_hit_probability") * F.col("s.health_percent") / 100
+        )
 
     # 5. Select & Write
     gold_df = df.select(
@@ -153,17 +169,12 @@ def process_threat_assessment(spark):
     ew_events = read_silver(spark, "cyber_ew_events")
 
     # Get Snapshots
-    latest_detections = get_latest_snapshot(detections, "target_id") # Assuming we want latest detection per target
+    latest_detections = get_latest_snapshot(detections, "target_id")
     latest_unit_pos = get_latest_snapshot(unit_status, "unit_id")
     latest_weather = get_latest_snapshot(weather, "region_id")
     latest_ew = get_latest_snapshot(ew_events, "target_sensor_id")
 
     # Join Chain
-    # Detection -> Target
-    # Detection -> Sensor -> Unit -> Unit Position (to calculate distance)
-    # Detection -> Region -> Weather
-    # Sensor -> EW
-    
     df = latest_detections.alias("d") \
         .join(targets.alias("t"), F.col("d.target_id") == F.col("t.id")) \
         .join(sensors.alias("s"), F.col("d.sensor_id") == F.col("s.id")) \
@@ -180,7 +191,7 @@ def process_threat_assessment(spark):
     df = df.withColumn("distance_km", 
         F.when(F.col("u_pos.lat").isNotNull(), 
                calculate_distance_km(F.col("u_pos.lat"), F.col("u_pos.lon"), F.col("d.lat"), F.col("d.lon")))
-         .otherwise(F.lit(1000000.0)) # Max value if unknown
+         .otherwise(F.lit(1000000.0))
     ).withColumn("adjusted_confidence",
         F.col("d.confidence").cast(DoubleType()) * (1 - 0.3 * intensity * is_bad_weather) * (1 - 0.5 * is_jammed)
     ).withColumn("predicted_threat",
@@ -244,7 +255,7 @@ def process_alerts_with_commands(spark):
         F.col("action"),
         F.col("u.id").alias("user_id"),
         F.col("final_event_time").alias("event_time")
-    ).distinct() # Commands join might duplicate alerts if multiple commands exist
+    ).distinct()
 
     write_gold(gold_df, "alerts_with_commands")
 
@@ -263,7 +274,7 @@ def process_logistics_readiness(spark):
 
     # Latest states
     latest_supply = get_latest_snapshot(supply, "unit_id")
-    latest_unit_loc = get_latest_snapshot(unit_status, "unit_id") # To find unit's current region
+    latest_unit_loc = get_latest_snapshot(unit_status, "unit_id")
     latest_weather = get_latest_snapshot(weather, "region_id")
 
     df = latest_supply.alias("s") \
@@ -274,17 +285,16 @@ def process_logistics_readiness(spark):
     # Variables
     intensity = F.coalesce(F.col("we.intensity"), F.lit(0)).cast(DoubleType())
     wind = F.coalesce(F.col("we.wind_speed_kmh"), F.lit(0)).cast(DoubleType())
-    precip = F.coalesce(F.col("we.precipitation_mm"), F.lit(0)).cast(DoubleType())
     
     df = df.withColumn("terrain_penalty", 
-        F.when(F.col("r.terrain_type") == "mountain", 0.7).otherwise(1.0)
-    ).withColumn("projected_supply",
-        F.col("s.supply_level").cast(DoubleType()) * (1 - 0.5 * intensity * F.when(F.col("we.type").isin("storm", "rain"), 1).otherwise(0) * F.col("terrain_penalty"))
-    ).withColumn("resupply_feasibility",
-        F.when((wind > 50) | (precip > 10), 0).otherwise(1)
-    ).withColumn("final_event_time", 
-         F.greatest(F.col("s.event_time"), F.col("we.event_time"))
-    )
+            F.when(F.col("r.terrain_type") == "mountain", 0.7).otherwise(1.0)
+        ).withColumn("projected_supply",
+            F.col("s.supply_level").cast(DoubleType()) * (1 - 0.5 * intensity * F.when(F.col("we.type").isin("storm", "rain"), 1).otherwise(0) * F.col("terrain_penalty"))
+        ).withColumn("resupply_feasibility",
+            F.when((wind > 50) | (intensity > 10), 0).otherwise(1)
+        ).withColumn("final_event_time", 
+             F.greatest(F.col("s.event_time"), F.col("we.event_time"))
+        )
 
     gold_df = df.select(
         F.col("s.unit_id"),
@@ -309,19 +319,14 @@ def process_engagement_analysis(spark):
     unit_status = read_silver(spark, "unit_status_updates")
     regions = read_silver(spark, "regions")
     weather = read_silver(spark, "weather_events")
-    ew_events = read_silver(spark, "cyber_ew_events")
     weapons = read_silver(spark, "weapons")
 
     # Step 1: Find Attacker's Region AT THE TIME of engagement
-    # Using a Window strategy to find the last status update before the engagement
-    # (Simplified for Batch: Join on Unit ID, Filter Status Time <= Eng Time, Take Max Status Time)
-    
     eng_context = engagements.alias("e") \
         .join(unit_status.alias("us"), 
               (F.col("e.attacker_id") == F.col("us.unit_id")) & 
               (F.col("us.event_time") <= F.col("e.event_time")))
 
-    # Pick the status closest to engagement time
     window_spec = Window.partitionBy("e.id").orderBy(F.col("us.event_time").desc())
     eng_with_region = eng_context.withColumn("rn", F.row_number().over(window_spec)) \
         .filter(F.col("rn") == 1) \
@@ -335,8 +340,7 @@ def process_engagement_analysis(spark):
         .join(regions.alias("r"), F.col("e.attacker_region_id") == F.col("r.id"), "left") \
         .join(weapons.alias("w"), F.col("e.weapon_id") == F.col("w.id"), "left")
 
-    # Step 3: Find Weather AT THE TIME of engagement in that region
-    # Similar window logic
+    # Step 3: Find Weather AT THE TIME of engagement
     df_weather = df.join(weather.alias("we"), 
         (F.col("e.attacker_region_id") == F.col("we.region_id")) & 
         (F.col("we.event_time") <= F.col("e.event_time")), "left")
@@ -344,15 +348,10 @@ def process_engagement_analysis(spark):
     w_window = Window.partitionBy("e.id").orderBy(F.col("we.event_time").desc())
     df_step3 = df_weather.withColumn("rn", F.row_number().over(w_window)).filter(F.col("rn") == 1).drop("rn")
 
-    # Step 4: Find EW Events (Assuming jamming impacts the whole region or correlated via sensor logic - simplifying to Time proximity here)
-    # Note: In real scenarios, we need to link Attacker Sensor -> EW Target Sensor. 
-    # Here we assume checking if ANY jamming was active nearby.
-    
-    # Logic: Variables
+    # Step 4: Logic
     intensity = F.coalesce(F.col("we.intensity"), F.lit(0)).cast(DoubleType())
     is_fog = F.when(F.col("we.type") == "fog", 1).otherwise(0)
-    # Placeholder for EW join (requires complex sensor mapping, skipping strict join for simplicity, assuming no jamming if null)
-    is_jammed = F.lit(0) 
+    is_jammed = F.lit(0) # Simplified assumption
 
     df_final = df_step3.withColumn("adjusted_hit_probability",
         F.col("w.hit_probability").cast(DoubleType()) * (1 - 0.2 * intensity * is_fog) * (1 - 0.3 * is_jammed)
@@ -379,12 +378,17 @@ def main():
     spark.sparkContext.setLogLevel("WARN")
     
     try:
+        start_global = time.time()
+        
         process_effective_unit_strength(spark)
         process_threat_assessment(spark)
         process_alerts_with_commands(spark)
         process_logistics_readiness(spark)
         process_engagement_analysis(spark)
-        logger.info("All Gold Layer processing completed.")
+        
+        total_duration = time.time() - start_global
+        logger.info(f"All Gold Layer processing completed in {total_duration:.2f}s.")
+        
     except Exception as e:
         logger.error(f"Gold processing failed: {e}")
         raise e
