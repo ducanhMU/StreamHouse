@@ -424,8 +424,8 @@ services:
       - "8084:8081"
     environment:
       - SPARK_MODE=worker
-      - SPARK_WORKER_CORES=2
-      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_CORES=4
+      - SPARK_WORKER_MEMORY=4g
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
     volumes:
@@ -476,8 +476,8 @@ services:
           --name 'Job1_Ingest_Kafka_To_HDFS' \
           --deploy-mode client \
           --conf spark.hadoop.hive.metastore.uris=thrift://hms:9083 \
-          --conf spark.cores.max=1 \
-          --conf spark.executor.memory=512m \
+          --conf spark.cores.max=2 \
+          --conf spark.executor.memory=1500m \
           /opt/spark/jobs/job1_ingest.py
     networks:
       - jadc2
@@ -526,8 +526,8 @@ services:
           --name 'Job2_Process_HDFS_To_Postgres' \
           --deploy-mode client \
           --conf spark.hadoop.hive.metastore.uris=thrift://hms:9083 \
-          --conf spark.cores.max=1 \
-          --conf spark.executor.memory=512m \
+          --conf spark.cores.max=2 \
+          --conf spark.executor.memory=1500m \
           /opt/spark/jobs/job2_process.py
     networks:
       - jadc2

@@ -1,3 +1,8 @@
+"""
+Spark Job 1: Bronze to Silver Layer Processing (Continuous Micro-batch)
+Reads data from Kafka and write to Delta Lake (Silver Layer), apply upsert, every 1 minute.
+"""
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, current_timestamp, get_json_object, expr
 from pyspark.sql.types import *

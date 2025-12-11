@@ -7,7 +7,7 @@ and writes to PostgreSQL (Gold Layer) every 2 minutes.
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
-from pyspark.sql.types import DoubleType, IntegerType, TimestampType
+from pyspark.sql.types import DoubleType, IntegerType, TimestampType, StringType
 import logging
 import time
 
@@ -24,7 +24,9 @@ logger = logging.getLogger("JADC2_SilverToGold")
 HDFS_SILVER_PATH = "hdfs://namenode:9000/data/delta/silver"
 
 # Output: Gold Layer (PostgreSQL)
-POSTGRES_URL = "jdbc:postgresql://postgres-dest:5432/jadc2_db"
+# --- FIX APPLIED HERE: Added ?stringtype=unspecified to the URL ---
+POSTGRES_URL = "jdbc:postgresql://postgres-dest:5432/jadc2_db?stringtype=unspecified"
+
 POSTGRES_PROPS = {
     "user": "admin",
     "password": "password",
@@ -35,10 +37,13 @@ POSTGRES_PROPS = {
 LOOP_INTERVAL_SECONDS = 120  # 2 Minutes
 
 def create_spark_session():
+    # Added network timeout configs to help with your previous "shutting down" errors
     return SparkSession.builder \
         .appName("JADC2_Job2_Silver_To_Gold") \
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+        .config("spark.network.timeout", "600s") \
+        .config("spark.executor.heartbeatInterval", "100s") \
         .enableHiveSupport() \
         .getOrCreate()
 
@@ -48,8 +53,8 @@ def read_silver(spark, table_name):
     # logger.info(f"Reading Silver Table: {table_name} from {path}")
     return spark.read.format("delta").load(path)
 
-def write_gold(df, table_name):
-    """Writes a Gold DataFrame to PostgreSQL with logging."""
+def write_gold(df, table_name, primary_keys):
+    """Writes a Gold DataFrame to PostgreSQL using UPSERT logic."""
     start_time = time.time()
     try:
         # Cache DataFrame to prevent re-calculation between count and write
@@ -60,24 +65,70 @@ def write_gold(df, table_name):
             logger.info(f"[{table_name}] No data to write. Skipping.")
             return
 
-        logger.info(f"Writing {count} rows to Gold Table: gold.{table_name}...")
+        logger.info(f"Upserting {count} rows to Gold Table: gold.{table_name}...")
         
-        # Write to Postgres
-        # FIX: Replaced df.write.jdbc() with format("jdbc") to support "stringtype" option
+        # Create temporary table name
+        temp_table = f"gold.temp_{table_name}"
+        
+        # Step 1: Write to temporary table
         df.write \
             .format("jdbc") \
             .option("url", POSTGRES_URL) \
-            .option("dbtable", f"gold.{table_name}") \
+            .option("dbtable", temp_table) \
             .option("user", POSTGRES_PROPS["user"]) \
             .option("password", POSTGRES_PROPS["password"]) \
             .option("driver", POSTGRES_PROPS["driver"]) \
-            .option("stringtype", "unspecified") \
             .option("truncate", "true") \
             .mode("overwrite") \
             .save()
         
+        # Step 2: Execute UPSERT via SQL
+        from pyspark.sql import SparkSession
+        spark = SparkSession.getActiveSession()
+        
+        # Build conflict columns for ON CONFLICT clause
+        conflict_cols = ", ".join(primary_keys)
+        
+        # Build UPDATE SET clause (all columns except primary keys)
+        all_cols = df.columns
+        update_cols = [col for col in all_cols if col not in primary_keys]
+        update_set = ", ".join([f'"{col}" = EXCLUDED."{col}"' for col in update_cols])
+        
+        upsert_sql = f"""
+        INSERT INTO gold.{table_name} 
+        SELECT * FROM {temp_table}
+        ON CONFLICT ({conflict_cols}) 
+        DO UPDATE SET {update_set}
+        """
+        
+        # Execute upsert via JDBC
+        connection_props = {
+            "user": POSTGRES_PROPS["user"],
+            "password": POSTGRES_PROPS["password"],
+            "driver": POSTGRES_PROPS["driver"]
+        }
+        
+        # Use Spark to execute the SQL
+        spark.read.format("jdbc") \
+            .option("url", POSTGRES_URL) \
+            .option("query", upsert_sql) \
+            .option("user", connection_props["user"]) \
+            .option("password", connection_props["password"]) \
+            .option("driver", connection_props["driver"]) \
+            .load()
+        
+        # Step 3: Drop temporary table
+        drop_sql = f"DROP TABLE IF EXISTS {temp_table}"
+        spark.read.format("jdbc") \
+            .option("url", POSTGRES_URL) \
+            .option("query", drop_sql) \
+            .option("user", connection_props["user"]) \
+            .option("password", connection_props["password"]) \
+            .option("driver", connection_props["driver"]) \
+            .load()
+        
         duration = time.time() - start_time
-        logger.info(f"SUCCESS [{table_name}] Written: {count} rows | Duration: {duration:.2f}s")
+        logger.info(f"SUCCESS [{table_name}] Upserted: {count} rows | Duration: {duration:.2f}s")
         
     except Exception as e:
         logger.error(f"FAILED [{table_name}] Error: {e}")
@@ -140,7 +191,6 @@ def process_effective_unit_strength(spark):
                 .when(F.col("r.terrain_type") == "swamp", 0.7)
                 .otherwise(1.0)
             ).withColumn("effective_range_km", 
-                # FIX: Changed 'w.max_range_km' to 'w.range_km'
                 F.col("w.range_km").cast(DoubleType()) * F.col("terrain_factor") * (1 - 0.1 * wind / 100)
             ).withColumn("adjusted_hit_probability",
                 F.col("w.hit_probability").cast(DoubleType()) * (1 - 0.15 * precip) * (1 - 0.2 * intensity * F.when(F.col("we.type") == "fog", 1).otherwise(0))
@@ -157,9 +207,13 @@ def process_effective_unit_strength(spark):
             F.col("adjusted_hit_probability"),
             F.col("attacking_strength"),
             F.col("s.event_time")
+        ).filter(
+            F.col("unit_id").isNotNull() & 
+            F.col("region_id").isNotNull() & 
+            F.col("weapon_id").isNotNull()
         )
         
-        write_gold(gold_df, "effective_unit_strength")
+        write_gold(gold_df, "effective_unit_strength", ["unit_id", "region_id", "weapon_id"])
     except Exception as e:
         logger.error(f"Error in effective_unit_strength: {e}")
 
@@ -192,7 +246,7 @@ def process_threat_assessment(spark):
         df = df.withColumn("distance_km", 
             F.when(F.col("u_pos.lat").isNotNull(), 
                 calculate_distance_km(F.col("u_pos.lat"), F.col("u_pos.lon"), F.col("d.lat"), F.col("d.lon")))
-            .otherwise(F.lit(1000000000.0)) # 1e9 as per design
+            .otherwise(F.lit(1000000000.0)) 
         ).withColumn("adjusted_confidence",
             F.col("d.confidence").cast(DoubleType()) * (1 - 0.3 * intensity * is_bad_weather) * (1 - 0.5 * is_jammed)
         ).withColumn("predicted_threat",
@@ -216,9 +270,12 @@ def process_threat_assessment(spark):
             F.col("distance_km"),
             F.col("response_time_sec"),
             F.col("d.event_time")
+        ).filter(
+            F.col("target_id").isNotNull() & 
+            F.col("region_id").isNotNull()
         )
 
-        write_gold(gold_df, "threat_assessment")
+        write_gold(gold_df, "threat_assessment", ["target_id"])
     except Exception as e:
         logger.error(f"Error in threat_assessment: {e}")
 
@@ -240,7 +297,6 @@ def process_alerts_with_commands(spark):
         df = df.withColumn("action", 
             F.when(F.col("u.role") == "commander", F.col("c.action")).otherwise(None)
         ).withColumn("final_event_time", 
-            # FIXED: Use 'created_at' for alerts as 'event_time' does not exist in alerts table
             F.greatest(F.col("a.created_at"), F.col("c.event_time"))
         )
 
@@ -253,9 +309,15 @@ def process_alerts_with_commands(spark):
             F.col("action"),
             F.col("u.id").alias("user_id"),
             F.col("final_event_time").alias("event_time")
+        ).filter(
+            F.col("alert_id").isNotNull() & 
+            F.col("detection_id").isNotNull() & 
+            F.col("region_id").isNotNull() & 
+            F.col("command_id").isNotNull() & 
+            F.col("user_id").isNotNull()
         ).distinct()
 
-        write_gold(gold_df, "alerts_with_commands")
+        write_gold(gold_df, "alerts_with_commands", ["alert_id"])
     except Exception as e:
         logger.error(f"Error in alerts_with_commands: {e}")
 
@@ -296,9 +358,12 @@ def process_logistics_readiness(spark):
             F.col("projected_supply"),
             F.col("resupply_feasibility"),
             F.col("final_event_time").alias("event_time")
+        ).filter(
+            F.col("unit_id").isNotNull() & 
+            F.col("region_id").isNotNull()
         )
 
-        write_gold(gold_df, "logistics_readiness")
+        write_gold(gold_df, "logistics_readiness", ["unit_id"])
     except Exception as e:
         logger.error(f"Error in logistics_readiness: {e}")
 
@@ -368,9 +433,15 @@ def process_engagement_analysis(spark):
             F.col("adjusted_hit_probability"),
             F.col("impact_factor"),
             F.col("e.event_time")
+        ).filter(
+            F.col("engagement_id").isNotNull() & 
+            F.col("attacker_id").isNotNull() & 
+            F.col("target_id").isNotNull() & 
+            F.col("weapon_id").isNotNull() & 
+            F.col("region_id").isNotNull()
         )
 
-        write_gold(gold_df, "engagement_analysis")
+        write_gold(gold_df, "engagement_analysis", ["engagement_id"])
     except Exception as e:
         logger.error(f"Error in engagement_analysis: {e}")
 
