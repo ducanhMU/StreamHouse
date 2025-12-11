@@ -2,8 +2,12 @@
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <configuration>
     <property>
+        <name>hive.metastore.local</name>
+        <value>false</value>
+    </property>
+    <property>
         <name>hive.metastore.uris</name>
-        <value>thrift://hms:9083</value>
+        <value>thrift://hms.jadc2:9083</value>
         <description>URI of the Hive Metastore Server</description>
     </property>
 
@@ -26,5 +30,3 @@
         <value>5</value>
     </property>
 </configuration>
-
-

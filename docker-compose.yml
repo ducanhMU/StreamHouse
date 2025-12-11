@@ -346,7 +346,7 @@ services:
   # HIVE METASTORE SERVICE
   # ============================================================================
   hms:
-    container_name: dp_hive_metastore
+    container_name: hms
     build:
       context: ./hive-metastore
       dockerfile: Dockerfile
@@ -455,6 +455,7 @@ services:
     environment:
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
+      - HADOOP_USER_NAME=root
     volumes:
       - ./spark/jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
@@ -474,6 +475,9 @@ services:
           --master spark://spark-master:7077 \
           --name 'Job1_Ingest_Kafka_To_HDFS' \
           --deploy-mode client \
+          --conf spark.hadoop.hive.metastore.uris=thrift://hms:9083 \
+          --conf spark.cores.max=1 \
+          --conf spark.executor.memory=512m \
           /opt/spark/jobs/job1_ingest.py
     networks:
       - jadc2
@@ -493,12 +497,12 @@ services:
     environment:
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
+      - HADOOP_USER_NAME=root
     volumes:
       - ./spark/jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
       - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
-      # 👇 THÊM DÒNG NÀY: Mount thư mục scripts vào container
-      - ./spark/scripts:/opt/spark/scripts:ro 
+      - ./spark/scripts:/opt/spark/scripts:ro
     command:
       - bash
       - -c
@@ -511,8 +515,6 @@ services:
 
         echo 'Checking Data Availability (Silver Layer)...'
         
-        # 👇 ĐOẠN SỬA: Dùng spark-submit chạy script python để check path
-        # Lưu ý: Đổi path kiểm tra sang 'silver/regions' vì Job 1 viết vào silver
         until /opt/spark/bin/spark-submit --master local[*] /opt/spark/scripts/check_hdfs_path.py "hdfs://namenode:9000/data/delta/silver/regions/_delta_log"; do
           echo 'Silver data not found yet. Sleeping 20s...'
           sleep 20
@@ -523,6 +525,9 @@ services:
           --master spark://spark-master:7077 \
           --name 'Job2_Process_HDFS_To_Postgres' \
           --deploy-mode client \
+          --conf spark.hadoop.hive.metastore.uris=thrift://hms:9083 \
+          --conf spark.cores.max=1 \
+          --conf spark.executor.memory=512m \
           /opt/spark/jobs/job2_process.py
     networks:
       - jadc2

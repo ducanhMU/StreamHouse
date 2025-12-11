@@ -1,6 +1,7 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, current_timestamp, get_json_object, expr
 from pyspark.sql.types import *
+from pyspark.storagelevel import StorageLevel  # Import added
 from delta import DeltaTable
 import logging
 import time
@@ -196,8 +197,11 @@ def process_stream(spark, table_name, schema):
         .withColumn("update_timestamp", current_timestamp()) # System processing time
     )
 
-    # 3. Upsert Logic (Merge) - LOGGING ADDED HERE
+    # 3. Upsert Logic (Merge) - FIXED WITH PERSIST/UNPERSIST
     def upsert_to_delta(batch_df, batch_id):
+        # FIX: Persist batch to memory/disk to prevent re-computation crashes during MERGE
+        batch_df.persist(StorageLevel.MEMORY_AND_DISK)
+        
         start_time = time.time()
         try:
             if batch_df.isEmpty():
@@ -235,6 +239,10 @@ def process_stream(spark, table_name, schema):
         except Exception as e:
             logger.error(f"CRITICAL ERROR in batch {batch_id} for table {table_name}: {e}")
             raise e
+        
+        finally:
+            # FIX: Force release memory
+            batch_df.unpersist()
 
     # 4. Start Streaming Query
     return (parsed_stream.writeStream
