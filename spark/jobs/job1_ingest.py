@@ -180,7 +180,7 @@ def process_stream(spark, table_name, schema):
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", topic_name)
         .option("startingOffsets", "earliest")
-        .option("maxOffsetsPerTrigger", 5000)
+        .option("maxOffsetsPerTrigger", 100)
         .option("failOnDataLoss", "false")
         .load())
 

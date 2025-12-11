@@ -191,7 +191,7 @@ Spark needs permission to push metadata to OpenMetadata.
 
 - In OM UI, go to **Settings** -> **Services** -> **Databases** -> **Add New Service**.
 
-- Select **Postgres**. Name it `postgres_source`.
+- Select **Postgres**. Name it `postgres-source`.
 
 - Connection:
 
@@ -211,7 +211,7 @@ Spark needs permission to push metadata to OpenMetadata.
 
 - Go to **Settings** -> **Services** -> **Messaging** -> **Add New Service**.
 
-- Select **Kafka**. Name it `kafka_messaging`.
+- Select **Kafka**. Name it `kafka`.
 
 - Connection:
 
@@ -227,7 +227,7 @@ This step links Postgres Source to Kafka Topics.
 
 - In OM UI: **Settings** -> **Services** -> **Pipeline** -> **Add New Service**.
 
-- Select **Kafka Connect**. Name: `debezium_cdc`.
+- Select **Kafka Connect**. Name: `debezium`.
 
 - Connection: HostPort: http://debezium:8083.
 
@@ -235,27 +235,29 @@ This step links Postgres Source to Kafka Topics.
 
 - **Add Ingestion** -> **Deploy & Run**.
 
-6. **Ingest "HDFS" Metadata (Storage Service)**
+6. **Ingest Delta Lake Metadata (Replaces HDFS Storage)**
 
-- Go to **Settings** -> **Services** -> **Storage** -> **Add New Service**.
+*Since you are storing data as Delta Lake tables on HDFS, we treat this as a Database Service, not a Storage Service.*
 
-- Select **HDFS** (or Data Lake). Name it `hdfs_datalake`.
+- Go to **Settings** -> **Services** -> **Databases** -> **Add New Service**.
+
+- Select **Delta Lake**. Name it `hdfs_delta_lake`.
 
 - Connection:
 
-    + HostPort: `hdfs://namenode:9000`
+    + **Metastore Host Port**: `thrift://hive-metastore:9083` (This connects OM to the HMS managing your Delta tables).
+
+    + **Storage Config**: You may leave this default or point to HDFS if required by your specific version, but the Metastore connection is key.
 
 - Click **Test Connection** -> **Save**.
 
-- **Add Ingestion:** Leave defaults or point to specific paths. Click **Deploy & Run**.
-
-*(Note: This step is crucial so the Spark Agent knows that paths starting with `hdfs://namenode:9000` belong to this specific service, preventing "orphan" lineage nodes.)*
+- **Add Ingestion**: Click **Deploy & Run**. *(Note: This allows OpenMetadata to read the actual schema of your Delta tables, which "Storage Service" cannot do effectively.)*
 
 7. **Ingest "Postgres Destination" Metadata**
 
 - Go to **Settings** -> **Services** -> **Databases** -> **Add New Service**.
 
-- Select **Postgres**. Name it `postgres_dest`.
+- Select **Postgres**. Name it `postgres-dest`.
 
 - Connection:
 
@@ -295,24 +297,92 @@ The `data-generator` creates a record in `postgres-source`.
 
 Debezium captures the INSERT and sends it to Kafka topic `topicName`.
 - **Verification**: Using Kafka UI or `kcat` or Spark logs to see incoming batches.
+```bash
+docker exec -it dp_kafka /opt/bitnami/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic server.public.orders --from-beginning --max-messages 1
+```
 
 **Step 3: Storage (HDFS/Delta)**
 
-`Spark Job 1` picks up the message and writes to HDFS.
-- **UI Check**: Go to http://localhost:9870 (HDFS NameNode) -> Utilities -> Browse Directory -> `/data/delta/orders`.
-- **Artifacts:** Look for `_delta_log` folder containing `.json` transaction files.
+`Spark Job 1` reads from Kafka and writes to HDFS in Delta format.
+
+- **Check 1: Spark Logs**
+```bash
+docker logs dp_spark_ingest | grep "Writing batch"
+```
+- **Check 2: HDFS Web UI**
+
+    + Open your browser to: http://localhost:9870
+
+    + Go to **Utilities** -> **Browse the file system**.
+
+    + Navigate to: `/user/hive/warehouse/` (or the path defined in your spark job, e.g., `/tmp/delta/orders`).
+
+    + **Verify Artifacts**: You should see a `_delta_log` folder (containing JSON transaction logs) and several `.parquet` files containing the actual data.
 
 **Step 4: Serving (Postgres Dest)**
 
 `Spark Job 2` reads the Delta table and writes to `postgres-dest`.
 - **SQL Check**: Connect to `localhost:5434` and `SELECT * FROM tableName;`
+```bash
+docker exec -it dp_postgres_dest psql -U admin -d jadc2_db -c "SELECT count(*) FROM orders_analytics;"
+```
+- **Expected Result:** The count should be increasing as the generator runs. If the count is > 0, the full pipeline is working.
 
 **Step 5: Observability (OpenMetadata)**
 
-- **UI Check:** Go to http://localhost:8585 (OM server).
-- **Search:** `tableName`.
-- **Lineage:** Verify the graph shows the complete flow from `Source` -> `Topic` -> `HDFS` -> `Dest`.
+- **Access UI:** Go to http://localhost:8585.
 
+- **Search:** Type orders in the search bar.
+
+- **Locate Table:** Click on the table that belongs to the Delta Lake service (or Hive).
+
+- **View Lineage:** Click the Lineage tab.
+
+- **Validation:** You should see a connected graph:
+```mermaid
+graph LR
+    %% --- Styling Definitions ---
+    classDef db fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1;
+    classDef topic fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#f57f17;
+    classDef process fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,stroke-dasharray: 5 5,color:#1b5e20;
+    classDef connect fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
+
+    %% --- Nodes ---
+    subgraph Source ["Source Layer"]
+        direction TB
+        SrcTable[("postgres-source<br/>.alerts")]:::db
+    end
+
+    subgraph Streaming ["Ingestion Layer (CDC)"]
+        direction TB
+        KConnect(Kafka Connect<br/>Debezium):::connect
+        KTopic([jadc2.raw<br/>.alerts]):::topic
+    end
+
+    subgraph DataLake ["Data Lake (HDFS/Delta)"]
+        direction TB
+        SparkIngest[[Spark Job 1:<br/>Ingest Kafka -> Delta]]:::process
+        DeltaTable[("hms_delta_lake<br/>.alerts")]:::db
+    end
+
+    subgraph Serving ["Serving Layer"]
+        direction TB
+        SparkProcess[[Spark Job 2:<br/>Aggregation]]:::process
+        DestTable[("postgres-dest<br/>.alerts")]:::db
+    end
+
+    %% --- Relationships ---
+    SrcTable -- "CDC Capture (WAL)" --> KConnect
+    KConnect -- "Publish JSON" --> KTopic
+    KTopic -- "Stream Read" --> SparkIngest
+    SparkIngest -- "Write Parquet/_delta_log" --> DeltaTable
+    DeltaTable -- "Batch Read" --> SparkProcess
+    SparkProcess -- "JDBC Write" --> DestTable
+
+    %% --- Legend for Clarity ---
+    %% Link styles
+    linkStyle 0,1,2,3,4,5 stroke:#333,stroke-width:2px;
+```
 ## 🔧 6. Advanced Configuration & Tuning
 
 **Scaling Spark**
