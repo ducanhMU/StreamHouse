@@ -26,6 +26,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("JADC2_SilverToGold")
 
+# --- SIMULATION SETTING (CHỈNH SỬA TẠI ĐÂY) ---
+SIMULATION_MODE = True   # Set True để chạy nhanh (limit 100), False để chạy thật (Full data)
+SIMULATION_LIMIT = 100   # Số dòng tối đa mỗi bảng khi chạy Simulation
+# ----------------------------------------------
+
 # Input: Silver Layer (Delta Lake)
 HDFS_SILVER_PATH = "hdfs://namenode:9000/data/delta/silver"
 
@@ -67,8 +72,8 @@ def create_spark_session():
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
         .config("spark.sql.shuffle.partitions", "200") \
-        .config("spark.executor.memory", "2g") \
-        .config("spark.driver.memory", "1g") \
+        .config("spark.executor.memory", "1500m") \
+        .config("spark.driver.memory", "500m") \
         .config("spark.memory.fraction", "0.8") \
         .config("spark.cleaner.periodicGC.interval", "10min") \
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
@@ -76,10 +81,27 @@ def create_spark_session():
         .getOrCreate()
 
 def read_silver(spark, table_name):
-    """Reads a Silver table from Delta Lake."""
+    """
+    Reads a Silver table from Delta Lake.
+    SUPPORTS SIMULATION MODE: Limits rows if configured.
+    """
     path = f"{HDFS_SILVER_PATH}/{table_name}"
-    # Read full table to ensure we have latest state for deduplication
-    return spark.read.format("delta").load(path)
+    df = spark.read.format("delta").load(path)
+    
+    if SIMULATION_MODE:
+        logger.warning(f"[SIMULATION] Limiting '{table_name}' to latest {SIMULATION_LIMIT} rows.")
+        
+        # Sắp xếp để lấy dữ liệu MỚI NHẤT, tránh lấy dữ liệu cũ làm sai logic join
+        if "event_time" in df.columns:
+            df = df.orderBy(F.col("event_time").desc())
+        elif "created_at" in df.columns:
+            df = df.orderBy(F.col("created_at").desc())
+        elif "updated_at" in df.columns:
+            df = df.orderBy(F.col("updated_at").desc())
+            
+        df = df.limit(SIMULATION_LIMIT)
+        
+    return df
 
 def write_gold(df, table_name, primary_keys):
     """Writes a Gold DataFrame to PostgreSQL using optimized UPSERT logic with Type Casting."""
