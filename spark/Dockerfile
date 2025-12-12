@@ -5,7 +5,7 @@ USER root
 
 # 1. Install system utilities
 RUN apt-get update && apt-get install -y \
-    curl wget netcat postgresql-client \
+    curl wget netcat postgresql-client jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Set environment variables

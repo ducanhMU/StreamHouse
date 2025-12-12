@@ -5,7 +5,8 @@ LOGIC:
 1. INPUT: Reads 50 rows from ACTUAL Silver tables (HDFS) to trigger Lineage.
 2. COMPUTE: Takes the primary table, fills missing 'join' columns with 
             random data to guarantee valid Gold output.
-3. OUTPUT: TRUNCATES and INSERTs 50 rows into PostgreSQL (Overwrite Mode).
+3. OUTPUT: TRUNCATES and INSERTs rows into PostgreSQL (Overwrite Mode).
+   FIX: Added deduplication to prevent Unique Constraint violations.
 -----------------------------------------------------------------------
 """
 
@@ -178,8 +179,7 @@ def rand_uuid(): return F.expr("uuid()")
 def rand_val(min_v, max_v): return (F.rand() * (max_v - min_v) + min_v).cast(DoubleType())
 
 def rand_enum(values): 
-    # FIXED: element_at requires an INT index, but FLOOR returns BIGINT.
-    # We must explicitly cast the index calculation to IntegerType.
+    # Use IntegerType for index
     arr = F.array([F.lit(x) for x in values])
     index_expr = (F.floor(F.rand() * len(values)) + 1).cast(IntegerType())
     return F.element_at(arr, index_expr)
@@ -196,14 +196,14 @@ def process_effective_unit_strength(spark):
     weapons = read_silver_limit(spark, "weapons")
     regions = read_silver_limit(spark, "regions")
     weather = read_silver_limit(spark, "weather_events")
-    unit_status = read_silver_limit(spark, "unit_status_updates") # Primary
+    unit_status = read_silver_limit(spark, "unit_status_updates") 
 
     if unit_status.isEmpty(): return
 
     # 2. MOCK COMPUTE
     df = unit_status.select(
         F.col("id").alias("unit_id"),  # Keep Real ID
-        F.col("region_id"), # Keep Real Region
+        F.col("region_id"), 
         rand_uuid().alias("weapon_id"),
         rand_val(0.5, 1.0).alias("terrain_factor"),
         rand_val(10.0, 100.0).alias("effective_range_km"),
@@ -211,6 +211,9 @@ def process_effective_unit_strength(spark):
         rand_val(0.0, 100.0).alias("attacking_strength"),
         F.current_timestamp().alias("event_time")
     )
+
+    # DEDUPLICATE: One strength report per unit
+    df = df.dropDuplicates(["unit_id"])
     
     write_gold_overwrite(df, "effective_unit_strength")
 
@@ -219,7 +222,7 @@ def process_threat_assessment(spark):
     
     # 1. READ SOURCES
     targets = read_silver_limit(spark, "targets")
-    detections = read_silver_limit(spark, "detections") # Primary
+    detections = read_silver_limit(spark, "detections") 
     sensors = read_silver_limit(spark, "sensors")
     units = read_silver_limit(spark, "units")
     unit_status = read_silver_limit(spark, "unit_status_updates")
@@ -231,7 +234,7 @@ def process_threat_assessment(spark):
     # 2. MOCK COMPUTE
     df = detections.select(
         F.col("target_id"), # Real ID
-        F.col("region_id"), # Real Region
+        F.col("region_id"), 
         rand_enum(ENUM_OPTS["iff"]).alias("iff_status"),
         rand_val(0.5, 1.0).alias("adjusted_confidence"),
         rand_enum(ENUM_OPTS["threat"]).alias("predicted_threat"),
@@ -239,6 +242,9 @@ def process_threat_assessment(spark):
         rand_val(0.0, 600.0).alias("response_time_sec"),
         F.current_timestamp().alias("event_time")
     )
+
+    # DEDUPLICATE: One threat assessment per target
+    df = df.dropDuplicates(["target_id"])
     
     write_gold_overwrite(df, "threat_assessment")
 
@@ -246,7 +252,7 @@ def process_alerts_with_commands(spark):
     logger.info(">>> Processing: alerts_with_commands")
     
     # 1. READ SOURCES
-    alerts = read_silver_limit(spark, "alerts") # Primary
+    alerts = read_silver_limit(spark, "alerts") 
     commands = read_silver_limit(spark, "commands")
     detections = read_silver_limit(spark, "detections")
     users = read_silver_limit(spark, "users")
@@ -265,13 +271,16 @@ def process_alerts_with_commands(spark):
         F.current_timestamp().alias("event_time")
     )
     
+    # Alerts are usually unique events, but dedupe just in case
+    df = df.dropDuplicates(["alert_id"])
+
     write_gold_overwrite(df, "alerts_with_commands")
 
 def process_logistics_readiness(spark):
     logger.info(">>> Processing: logistics_readiness")
     
     # 1. READ SOURCES
-    supply = read_silver_limit(spark, "supply_status") # Primary
+    supply = read_silver_limit(spark, "supply_status") 
     regions = read_silver_limit(spark, "regions")
     weather = read_silver_limit(spark, "weather_events")
     unit_status = read_silver_limit(spark, "unit_status_updates")
@@ -288,13 +297,16 @@ def process_logistics_readiness(spark):
         F.current_timestamp().alias("event_time")
     )
     
+    # DEDUPLICATE: One supply status per unit
+    df = df.dropDuplicates(["unit_id"])
+    
     write_gold_overwrite(df, "logistics_readiness")
 
 def process_engagement_analysis(spark):
     logger.info(">>> Processing: engagement_analysis")
     
     # 1. READ SOURCES
-    engagements = read_silver_limit(spark, "engagement_events") # Primary
+    engagements = read_silver_limit(spark, "engagement_events") 
     unit_status = read_silver_limit(spark, "unit_status_updates")
     regions = read_silver_limit(spark, "regions")
     weather = read_silver_limit(spark, "weather_events")
@@ -316,6 +328,9 @@ def process_engagement_analysis(spark):
         F.current_timestamp().alias("event_time")
     )
     
+    # DEDUPLICATE: One record per engagement ID
+    df = df.dropDuplicates(["engagement_id"])
+
     write_gold_overwrite(df, "engagement_analysis")
 
 # ==========================================
