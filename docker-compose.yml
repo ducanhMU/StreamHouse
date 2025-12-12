@@ -478,7 +478,7 @@ services:
           --conf spark.hadoop.hive.metastore.uris=thrift://hms:9083 \
           --conf spark.cores.max=2 \
           --conf spark.executor.memory=1500m \
-          /opt/spark/jobs/job1_ingest.py
+          /opt/spark/jobs/job1_demo.py
     networks:
       - jadc2
 
@@ -528,7 +528,7 @@ services:
           --conf spark.hadoop.hive.metastore.uris=thrift://hms:9083 \
           --conf spark.cores.max=2 \
           --conf spark.executor.memory=1500m \
-          /opt/spark/jobs/job2_process.py
+          /opt/spark/jobs/job2_demo.py
     networks:
       - jadc2
       
