@@ -2,6 +2,11 @@
 Spark Job 2: Silver to Gold Layer Processing (Continuous Micro-batch)
 Reads refined data from Delta Lake (Silver Layer), applies business logic, 
 and writes to PostgreSQL (Gold Layer) every 2 minutes.
+
+FIXES APPLIED:
+- Explicit UUID casting for ID columns.
+- Context-aware casting for 'target_id' (UUID in engagement, Text in threat).
+- Enum casting for Postgres custom types.
 """
 
 from pyspark.sql import SparkSession
@@ -10,6 +15,7 @@ from pyspark.sql.window import Window
 from pyspark.sql.types import DoubleType, IntegerType, TimestampType, StringType
 import logging
 import time
+import psycopg2 # Standard driver for Postgres SQL execution
 
 # ==========================================
 # CONFIGURATION
@@ -24,7 +30,6 @@ logger = logging.getLogger("JADC2_SilverToGold")
 HDFS_SILVER_PATH = "hdfs://namenode:9000/data/delta/silver"
 
 # Output: Gold Layer (PostgreSQL)
-# --- FIX APPLIED HERE: Added ?stringtype=unspecified to the URL ---
 POSTGRES_URL = "jdbc:postgresql://postgres-dest:5432/jadc2_db?stringtype=unspecified"
 
 POSTGRES_PROPS = {
@@ -36,30 +41,51 @@ POSTGRES_PROPS = {
 # Loop Config
 LOOP_INTERVAL_SECONDS = 120  # 2 Minutes
 
+# Columns that are ALWAYS UUIDs in your schema
+GLOBAL_UUID_COLS = {
+    "unit_id", "region_id", "weapon_id", "alert_id", 
+    "detection_id", "command_id", "user_id", 
+    "attacker_id", "engagement_id", "sensor_id"
+}
+
+# Columns that map to Postgres Enums
+ENUM_CASTS = {
+    "iff_status": "gold.iff_status",
+    "threat_level": "gold.threat_level",
+    "result": "gold.engagement_result",
+    "unit_status": "gold.unit_status"
+}
+
 def create_spark_session():
-    # Added network timeout configs to help with your previous "shutting down" errors
+    # Optimized configs for long-running jobs with growing data
     return SparkSession.builder \
         .appName("JADC2_Job2_Silver_To_Gold") \
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
         .config("spark.network.timeout", "600s") \
         .config("spark.executor.heartbeatInterval", "100s") \
+        .config("spark.sql.adaptive.enabled", "true") \
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+        .config("spark.sql.shuffle.partitions", "200") \
+        .config("spark.executor.memory", "2g") \
+        .config("spark.driver.memory", "1g") \
+        .config("spark.memory.fraction", "0.8") \
+        .config("spark.cleaner.periodicGC.interval", "10min") \
+        .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
         .enableHiveSupport() \
         .getOrCreate()
 
 def read_silver(spark, table_name):
     """Reads a Silver table from Delta Lake."""
     path = f"{HDFS_SILVER_PATH}/{table_name}"
-    # logger.info(f"Reading Silver Table: {table_name} from {path}")
+    # Read full table to ensure we have latest state for deduplication
     return spark.read.format("delta").load(path)
 
 def write_gold(df, table_name, primary_keys):
-    """Writes a Gold DataFrame to PostgreSQL using UPSERT logic."""
+    """Writes a Gold DataFrame to PostgreSQL using optimized UPSERT logic with Type Casting."""
     start_time = time.time()
     try:
-        # Cache DataFrame to prevent re-calculation between count and write
-        df.cache()
-        
+        # Repartition to reduce memory pressure and parallelize write
         count = df.count()
         if count == 0:
             logger.info(f"[{table_name}] No data to write. Skipping.")
@@ -67,10 +93,21 @@ def write_gold(df, table_name, primary_keys):
 
         logger.info(f"Upserting {count} rows to Gold Table: gold.{table_name}...")
         
+        # Optimize partitioning based on data size
+        if count < 1000:
+            num_partitions = 1
+        elif count < 10000:
+            num_partitions = 4
+        else:
+            num_partitions = 8
+        
+        df = df.repartition(num_partitions)
+        df.cache()
+        
         # Create temporary table name
         temp_table = f"gold.temp_{table_name}"
         
-        # Step 1: Write to temporary table
+        # Step 1: Write to temporary table (Spark writes everything as Text/Double)
         df.write \
             .format("jdbc") \
             .option("url", POSTGRES_URL) \
@@ -78,54 +115,85 @@ def write_gold(df, table_name, primary_keys):
             .option("user", POSTGRES_PROPS["user"]) \
             .option("password", POSTGRES_PROPS["password"]) \
             .option("driver", POSTGRES_PROPS["driver"]) \
+            .option("batchsize", "5000") \
             .option("truncate", "true") \
             .mode("overwrite") \
             .save()
         
-        # Step 2: Execute UPSERT via SQL
-        from pyspark.sql import SparkSession
-        spark = SparkSession.getActiveSession()
+        # Step 2: Construct SQL with EXPLICIT CASTING
+        columns = df.columns
+        select_parts = []
+        
+        for c in columns:
+            # 1. Global UUIDs (e.g. unit_id, region_id)
+            if c in GLOBAL_UUID_COLS:
+                select_parts.append(f'"{c}"::uuid')
+            
+            # 2. Context-Aware UUIDs (The fix for your error)
+            # target_id is UUID in engagement_analysis, but Text in threat_assessment
+            elif c == "target_id" and table_name == "engagement_analysis":
+                 select_parts.append(f'"{c}"::uuid')
+            
+            # 3. Enum Casting
+            elif c in ENUM_CASTS:
+                enum_type = ENUM_CASTS[c]
+                select_parts.append(f'"{c}"::{enum_type}')
+            
+            # 4. Default
+            else:
+                select_parts.append(f'"{c}"')
+
+        select_clause = ", ".join(select_parts)
+        insert_cols = ", ".join([f'"{c}"' for c in columns])
         
         # Build conflict columns for ON CONFLICT clause
-        conflict_cols = ", ".join(primary_keys)
+        conflict_cols = ", ".join([f'"{k}"' for k in primary_keys])
         
         # Build UPDATE SET clause (all columns except primary keys)
-        all_cols = df.columns
-        update_cols = [col for col in all_cols if col not in primary_keys]
+        update_cols = [col for col in columns if col not in primary_keys]
         update_set = ", ".join([f'"{col}" = EXCLUDED."{col}"' for col in update_cols])
         
         upsert_sql = f"""
-        INSERT INTO gold.{table_name} 
-        SELECT * FROM {temp_table}
+        INSERT INTO gold.{table_name} ({insert_cols})
+        SELECT {select_clause} FROM {temp_table}
         ON CONFLICT ({conflict_cols}) 
-        DO UPDATE SET {update_set}
+        DO UPDATE SET {update_set};
         """
         
-        # Execute upsert via JDBC
-        connection_props = {
-            "user": POSTGRES_PROPS["user"],
-            "password": POSTGRES_PROPS["password"],
-            "driver": POSTGRES_PROPS["driver"]
-        }
-        
-        # Use Spark to execute the SQL
-        spark.read.format("jdbc") \
-            .option("url", POSTGRES_URL) \
-            .option("query", upsert_sql) \
-            .option("user", connection_props["user"]) \
-            .option("password", connection_props["password"]) \
-            .option("driver", connection_props["driver"]) \
-            .load()
-        
-        # Step 3: Drop temporary table
         drop_sql = f"DROP TABLE IF EXISTS {temp_table}"
-        spark.read.format("jdbc") \
-            .option("url", POSTGRES_URL) \
-            .option("query", drop_sql) \
-            .option("user", connection_props["user"]) \
-            .option("password", connection_props["password"]) \
-            .option("driver", connection_props["driver"]) \
-            .load()
+        
+        # Step 3: Execute via psycopg2 (Robust Driver)
+        # Parse JDBC URL to get connection parameters
+        jdbc_url_clean = POSTGRES_URL.replace("jdbc:postgresql://", "").split("?")[0]
+        host_port_db = jdbc_url_clean.split("/")
+        host_port = host_port_db[0].split(":")
+        host = host_port[0]
+        port = int(host_port[1])
+        database = host_port_db[1]
+
+        try:
+            conn = psycopg2.connect(
+                host=host,
+                port=port,
+                database=database,
+                user=POSTGRES_PROPS["user"],
+                password=POSTGRES_PROPS["password"]
+            )
+            conn.autocommit = True
+            cursor = conn.cursor()
+            
+            # Execute UPSERT
+            cursor.execute(upsert_sql)
+            
+            # Drop temp table
+            cursor.execute(drop_sql)
+            
+            cursor.close()
+            conn.close()
+            
+        except Exception as db_error:
+            logger.error(f"Database execution error: {db_error}")
+            raise db_error
         
         duration = time.time() - start_time
         logger.info(f"SUCCESS [{table_name}] Upserted: {count} rows | Duration: {duration:.2f}s")
@@ -213,7 +281,7 @@ def process_effective_unit_strength(spark):
             F.col("weapon_id").isNotNull()
         )
         
-        write_gold(gold_df, "effective_unit_strength", ["unit_id", "region_id", "weapon_id"])
+        write_gold(gold_df, "effective_unit_strength", ["unit_id", "weapon_id"])
     except Exception as e:
         logger.error(f"Error in effective_unit_strength: {e}")
 
@@ -468,6 +536,11 @@ def main():
             end_cycle = time.time()
             duration = end_cycle - start_cycle
             logger.info(f"--- CYCLE COMPLETED in {duration:.2f}s. Sleeping for {LOOP_INTERVAL_SECONDS}s... ---")
+            
+            # Force garbage collection after each cycle to free memory
+            spark.catalog.clearCache()
+            import gc
+            gc.collect()
             
             # 3. Sleep
             time.sleep(LOOP_INTERVAL_SECONDS)
