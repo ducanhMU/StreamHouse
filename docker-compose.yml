@@ -677,8 +677,7 @@ services:
         condition: service_healthy
       openmetadata-mysql:
         condition: service_healthy
-      openmetadata-migrate:
-        condition: service_completed_successfully
+    
     networks:
       - jadc2
     healthcheck:
@@ -721,13 +720,6 @@ services:
       - ingestion-volume-dag-airflow:/opt/airflow/dag_generated_configs
       - ingestion-volume-dags:/opt/airflow/dags
       - ingestion-volume-tmp:/tmp
-    depends_on:
-      openmetadata-elasticsearch:
-        condition: service_healthy
-      openmetadata-mysql:
-        condition: service_healthy
-    networks:
-      - jadc2
 
   # ==========================================================================
   # OPENMETADATA - SERVER

@@ -269,6 +269,7 @@ def main():
         .appName("JADC2_Job1_Throttled_Stream")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .config("hive.metastore.uris", "thrift://hms:9083")
         .enableHiveSupport()
         .getOrCreate())
     

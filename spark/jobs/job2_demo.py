@@ -71,6 +71,7 @@ def create_spark_session():
         .appName("JADC2_Job2_Lineage_Demo") \
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+        .config("hive.metastore.uris", "thrift://hms:9083") \
         .config("spark.executor.memory", "2g") \
         .config("spark.driver.memory", "1g") \
         .enableHiveSupport() \
