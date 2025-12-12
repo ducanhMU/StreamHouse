@@ -11,7 +11,7 @@ LOGIC:
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType, StringType
+from pyspark.sql.types import DoubleType, StringType, IntegerType
 import logging
 import time
 import psycopg2 
@@ -36,7 +36,7 @@ POSTGRES_PROPS = {
 
 # DEMO CONFIG
 LOOP_INTERVAL_SECONDS = 60
-DEMO_ROW_LIMIT = 50  # <-- CHANGED TO 50 AS REQUESTED
+DEMO_ROW_LIMIT = 50 
 
 # ==========================================
 # TYPE SAFETY CONSTANTS
@@ -176,9 +176,13 @@ def write_gold_overwrite(df, table_name):
 # Generators for Synthetic Data
 def rand_uuid(): return F.expr("uuid()")
 def rand_val(min_v, max_v): return (F.rand() * (max_v - min_v) + min_v).cast(DoubleType())
+
 def rand_enum(values): 
+    # FIXED: element_at requires an INT index, but FLOOR returns BIGINT.
+    # We must explicitly cast the index calculation to IntegerType.
     arr = F.array([F.lit(x) for x in values])
-    return F.element_at(arr, F.floor(F.rand() * len(values)) + 1)
+    index_expr = (F.floor(F.rand() * len(values)) + 1).cast(IntegerType())
+    return F.element_at(arr, index_expr)
 
 # ==========================================
 # BUSINESS LOGIC (MOCK COMPUTE)
@@ -187,7 +191,7 @@ def rand_enum(values):
 def process_effective_unit_strength(spark):
     logger.info(">>> Processing: effective_unit_strength")
     
-    # 1. READ ALL SOURCES (For Lineage) - 50 rows each
+    # 1. READ ALL SOURCES (For Lineage)
     units = read_silver_limit(spark, "units")
     weapons = read_silver_limit(spark, "weapons")
     regions = read_silver_limit(spark, "regions")
@@ -196,7 +200,7 @@ def process_effective_unit_strength(spark):
 
     if unit_status.isEmpty(): return
 
-    # 2. MOCK COMPUTE (Use Primary, Generate Randoms)
+    # 2. MOCK COMPUTE
     df = unit_status.select(
         F.col("id").alias("unit_id"),  # Keep Real ID
         F.col("region_id"), # Keep Real Region

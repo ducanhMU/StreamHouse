@@ -457,6 +457,7 @@ services:
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
       - HADOOP_USER_NAME=root
     volumes:
+      - ./spark/scripts:/opt/scripts:ro
       - ./spark/jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
       - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
@@ -464,6 +465,8 @@ services:
       - bash
       - -c
       - |
+        source /opt/scripts/get_om_token.sh
+
         echo 'Waiting for Spark Master...'
         while ! nc -z spark-master 7077; do sleep 2; done
 
@@ -507,6 +510,8 @@ services:
       - bash
       - -c
       - |
+        source /opt/scripts/get_om_token.sh
+        
         echo 'Waiting for Spark Master...'
         while ! nc -z spark-master 7077; do sleep 2; done
         
