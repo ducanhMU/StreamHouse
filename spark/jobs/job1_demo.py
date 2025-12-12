@@ -209,11 +209,18 @@ def start_stream_for_table(spark, table_name, schema):
 
     # 3. UPSERT FUNCTION (Batch Logic)
     def upsert_to_delta(batch_df, batch_id):
+        start_time = time.time()
+        
         # Optimization: Persist to prevent re-read from Kafka during merge
         batch_df.persist(StorageLevel.MEMORY_AND_DISK)
         try:
-            if batch_df.isEmpty():
+            count = batch_df.count()
+            if count == 0:
+                logger.info(f"[{table_name}] Batch {batch_id}: No new data. Skipping.")
                 return
+
+            logger.info(f"--- STARTING BATCH CYCLE for {table_name} (Batch {batch_id}) ---")
+            logger.info(f"[{table_name}] Processing {count} records...")
             
             # Use the active session from the DataFrame
             _spark = batch_df.sparkSession
@@ -228,17 +235,21 @@ def start_stream_for_table(spark, table_name, schema):
                     .whenMatchedUpdateAll()
                     .whenNotMatchedInsertAll()
                     .execute())
+                action = "MERGED"
             else:
                 batch_df.write \
                     .format("delta") \
                     .mode("append") \
                     .option("path", delta_path) \
                     .saveAsTable(f"default.{table_name}")
+                action = "CREATED/APPENDED"
             
-            logger.info(f"[{table_name}] Batch {batch_id}: Processed {batch_df.count()} records.")
+            duration = time.time() - start_time
+            logger.info(f"SUCCESS [{table_name}] {action} {count} records in {duration:.2f}s")
+            logger.info(f"--- BATCH DONE for {table_name} ---")
 
         except Exception as e:
-            logger.error(f"[{table_name}] Batch {batch_id} Error: {e}")
+            logger.error(f"FAILED [{table_name}] Batch {batch_id} Error: {e}")
         finally:
             batch_df.unpersist()
 
@@ -262,6 +273,7 @@ def main():
         .getOrCreate())
     
     spark.sparkContext.setLogLevel("WARN")
+    logger.info("Spark Job 1 Started: Streaming from Kafka -> Silver Delta Lake (Throttled)")
 
     tables = [
         "regions", "targets", "users", "units", "weapons", 
@@ -279,12 +291,16 @@ def main():
                 stream = start_stream_for_table(spark, table, schema)
                 active_streams.append(stream)
             except Exception as e:
-                logger.error(f"Failed {table}: {e}")
+                logger.error(f"Failed to start stream for {table}: {e}")
         else:
-            logger.error(f"No schema for {table}")
+            logger.error(f"No schema defined for {table}")
 
-    logger.info(f"Running {len(active_streams)} streams. (1 min trigger, 100 msg limit)")
-    spark.streams.awaitAnyTermination()
+    logger.info(f"Running {len(active_streams)} streams. (1 min trigger, 50 msg limit per batch)")
+    
+    try:
+        spark.streams.awaitAnyTermination()
+    except KeyboardInterrupt:
+        logger.info("Job stopped by user.")
 
 if __name__ == "__main__":
     main()

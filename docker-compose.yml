@@ -465,7 +465,6 @@ services:
       - bash
       - -c
       - |
-        source /opt/scripts/get_om_token.sh
 
         echo 'Waiting for Spark Master...'
         while ! nc -z spark-master 7077; do sleep 2; done
@@ -510,7 +509,6 @@ services:
       - bash
       - -c
       - |
-        source /opt/scripts/get_om_token.sh
         
         echo 'Waiting for Spark Master...'
         while ! nc -z spark-master 7077; do sleep 2; done
