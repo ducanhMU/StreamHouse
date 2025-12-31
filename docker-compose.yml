@@ -1,5 +1,257 @@
-version: "3.8"
+version: "3.9"
+
+# ============================================================================
+# VOLUMES
+# ============================================================================
+volumes:
+  # Existing volumes
+  postgres_source_data:
+  postgres_dest_data:
+  kafka_data:
+  namenode_data:
+  datanode_data:
+  hms_data:
+  
+  # OpenMetadata volumes
+  ingestion-volume-dag-airflow:
+  ingestion-volume-dags:
+  ingestion-volume-tmp:
+  es-data:
+  openmetadata-mysql-data:
+
+# ============================================================================
+# NETWORKS
+# ============================================================================
+networks:
+  jadc2:
+    name: jadc2
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: "172.16.240.0/24"
+
+# ============================================================================
+# SERVICES
+# ============================================================================
 services:
+  # ============================================================================
+  # OPENMETADATA - MySQL Database
+  # ============================================================================
+  openmetadata-mysql:
+    container_name: openmetadata_mysql
+    image: docker.getcollate.io/openmetadata/db:1.11.3
+    command: "--sort_buffer_size=10M"
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+    expose:
+      - 3306
+    ports:
+      - "3307:3306"  # Changed port to avoid conflict
+    volumes:
+      - openmetadata-mysql-data:/var/lib/mysql
+    networks:
+      - jadc2
+    healthcheck:
+      test: mysql --user=root --password=$$MYSQL_ROOT_PASSWORD --silent --execute "use openmetadata_db"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ============================================================================
+  # OPENMETADATA - Elasticsearch
+  # ============================================================================
+  openmetadata-elasticsearch:
+    container_name: openmetadata_elasticsearch
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.4
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1024m -Xmx1024m
+      - xpack.security.enabled=false
+    networks:
+      - jadc2
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    healthcheck:
+      test: "curl -s http://localhost:9200/_cluster/health?pretty | grep status | grep -qE 'green|yellow' || exit 1"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+
+  # ============================================================================
+  # OPENMETADATA - Migration Service
+  # ============================================================================
+  execute-migrate-all:
+    container_name: execute_migrate_all
+    image: docker.getcollate.io/openmetadata/server:1.11.3
+    command: "./bootstrap/openmetadata-ops.sh migrate"
+    environment:
+      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
+      SERVER_PORT: ${SERVER_PORT:-8585}
+      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      
+      MIGRATION_LIMIT_PARAM: ${MIGRATION_LIMIT_PARAM:-1200}
+      
+      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
+      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
+      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
+      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
+      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
+      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
+      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
+      
+      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
+      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
+      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
+      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
+      
+      PIPELINE_SERVICE_CLIENT_ENDPOINT: ${PIPELINE_SERVICE_CLIENT_ENDPOINT:-http://openmetadata-ingestion:8080}
+      SERVER_HOST_API_URL: ${SERVER_HOST_API_URL:-http://openmetadata-server:8585/api}
+      
+      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
+      DB_SCHEME: ${DB_SCHEME:-mysql}
+      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
+      DB_USER: ${DB_USER:-openmetadata_user}
+      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
+      DB_HOST: ${DB_HOST:-openmetadata-mysql}
+      DB_PORT: ${DB_PORT:-3306}
+      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
+      
+      ELASTICSEARCH_HOST: ${ELASTICSEARCH_HOST:-openmetadata-elasticsearch}
+      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
+      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
+      SEARCH_TYPE: ${SEARCH_TYPE:-elasticsearch}
+      
+      PIPELINE_SERVICE_CLIENT_ENABLED: ${PIPELINE_SERVICE_CLIENT_ENABLED:-true}
+      AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+      FERNET_KEY: ${FERNET_KEY:-jJ/9sz0g0OHxsfxOoSfdFdmk3ysNmPRnH3TUAbz3IHA=}
+      
+      SECRET_MANAGER: ${SECRET_MANAGER:-db}
+      OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
+      
+    depends_on:
+      openmetadata-elasticsearch:
+        condition: service_healthy
+      openmetadata-mysql:
+        condition: service_healthy
+    networks:
+      - jadc2
+
+  # ============================================================================
+  # OPENMETADATA - Server
+  # ============================================================================
+  openmetadata-server:
+    container_name: openmetadata_server
+    restart: always
+    image: docker.getcollate.io/openmetadata/server:1.11.3
+    environment:
+      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
+      SERVER_PORT: ${SERVER_PORT:-8585}
+      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      
+      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
+      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
+      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
+      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
+      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
+      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
+      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
+      
+      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
+      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
+      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
+      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
+      
+      PIPELINE_SERVICE_CLIENT_ENDPOINT: ${PIPELINE_SERVICE_CLIENT_ENDPOINT:-http://openmetadata-ingestion:8080}
+      SERVER_HOST_API_URL: ${SERVER_HOST_API_URL:-http://openmetadata-server:8585/api}
+      
+      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
+      DB_SCHEME: ${DB_SCHEME:-mysql}
+      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
+      DB_USER: ${DB_USER:-openmetadata_user}
+      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
+      DB_HOST: ${DB_HOST:-openmetadata-mysql}
+      DB_PORT: ${DB_PORT:-3306}
+      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
+      
+      ELASTICSEARCH_HOST: ${ELASTICSEARCH_HOST:-openmetadata-elasticsearch}
+      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
+      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
+      SEARCH_TYPE: ${SEARCH_TYPE:-elasticsearch}
+      
+      EVENT_MONITOR: ${EVENT_MONITOR:-prometheus}
+      
+      PIPELINE_SERVICE_CLIENT_ENABLED: ${PIPELINE_SERVICE_CLIENT_ENABLED:-true}
+      AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+      FERNET_KEY: ${FERNET_KEY:-jJ/9sz0g0OHxsfxOoSfdFdmk3ysNmPRnH3TUAbz3IHA=}
+      
+      SECRET_MANAGER: ${SECRET_MANAGER:-db}
+      OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
+    
+    expose:
+      - 8585
+      - 8586
+    ports:
+      - "8585:8585"
+      - "8586:8586"
+    depends_on:
+      openmetadata-elasticsearch:
+        condition: service_healthy
+      openmetadata-mysql:
+        condition: service_healthy
+      execute-migrate-all:
+        condition: service_completed_successfully
+    networks:
+      - jadc2
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "--spider",  "http://localhost:8586/healthcheck" ]
+
+  # ============================================================================
+  # OPENMETADATA - Ingestion (Airflow)
+  # ============================================================================
+  openmetadata-ingestion:
+    container_name: openmetadata_ingestion
+    image: docker.getcollate.io/openmetadata/ingestion:1.11.3
+    depends_on:
+      openmetadata-elasticsearch:
+        condition: service_started
+      openmetadata-mysql:
+        condition: service_healthy
+      openmetadata-server:
+        condition: service_started
+    environment:
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__OPENMETADATA_AIRFLOW_APIS__DAG_GENERATED_CONFIGS: "/opt/airflow/dag_generated_configs"
+      DB_HOST: ${AIRFLOW_DB_HOST:-openmetadata-mysql}
+      DB_PORT: ${AIRFLOW_DB_PORT:-3306}
+      AIRFLOW_DB: ${AIRFLOW_DB:-airflow_db}
+      DB_SCHEME: ${AIRFLOW_DB_SCHEME:-mysql+mysqldb}
+      DB_USER: ${AIRFLOW_DB_USER:-airflow_user}
+      DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_pass}
+      DB_PROPERTIES: ${AIRFLOW_DB_PROPERTIES:-}
+    entrypoint: /bin/bash
+    command:
+      - "/opt/airflow/ingestion_dependency.sh"
+    expose:
+      - 8080
+    ports:
+      - "8087:8080"  # Changed port to avoid conflict
+    networks:
+      - jadc2
+    volumes:
+      - ingestion-volume-dag-airflow:/opt/airflow/dag_generated_configs
+      - ingestion-volume-dags:/opt/airflow/dags
+      - ingestion-volume-tmp:/tmp
+
   # ============================================================================
   # SOURCE DATABASE (Có cấu hình WAL cho Debezium + Stats cho OpenMetadata)
   # ============================================================================
@@ -15,7 +267,7 @@ services:
     command:
       - "postgres"
       - "-c"
-      - "wal_level=logical"          # Cần cho Debezium (CDC)
+      - "wal_level=logical"
       - "-c"
       - "max_wal_senders=10"
       - "-c"
@@ -24,7 +276,6 @@ services:
       - "wal_sender_timeout=0"
       - "-c"
       - "max_connections=200"
-      # --- THÊM PHẦN NÀY CHO OPENMETADATA ---
       - "-c"
       - "shared_preload_libraries=pg_stat_statements"
       - "-c"
@@ -63,7 +314,6 @@ services:
       - "postgres"
       - "-c"
       - "max_connections=200"
-      # --- THÊM PHẦN NÀY CHO OPENMETADATA ---
       - "-c"
       - "shared_preload_libraries=pg_stat_statements"
       - "-c"
@@ -121,23 +371,17 @@ services:
       - "9092:9092"
       - "29092:29092"
     environment:
-      # KRaft mode required settings:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      # define listeners (internal controller + external broker)
       KAFKA_LISTENERS: CONTROLLER://:9093,PLAINTEXT://:9092,PLAINTEXT_HOST://0.0.0.0:29092
-      # advertise to clients (outside docker) and internal network
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      # single-node cluster: single controller quorum voter
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      # internal topics replication (must be 1 if only one broker)
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      # keep your existing settings if still needed
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     healthcheck:
       test: nc -z dp_kafka 9092 || exit 1
@@ -238,15 +482,12 @@ services:
     container_name: dp_hdfs_namenode
     image: apache/hadoop:3
     hostname: namenode
-    # CHẠY BẰNG ROOT ĐỂ GHI ĐƯỢC VÀO VOLUME
     user: "root"
-    # Script: Cấp quyền 777 cho thư mục -> Kiểm tra đã format chưa -> Format -> Chạy
     command: ["/bin/bash", "-c", "chmod -R 777 /tmp/hadoop-root/dfs/name; if [ ! -d /tmp/hadoop-root/dfs/name/current ]; then echo 'Formatting NameNode...'; hdfs namenode -format -force -nonInteractive; fi; hdfs namenode"]
     ports:
       - "9870:9870"
       - "9003:9000"
     environment:
-      # Bắt buộc khi chạy user root
       HDFS_NAMENODE_USER: "root"
       CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
       HDFS-SITE.XML_dfs.replication: "1"
@@ -266,7 +507,6 @@ services:
     container_name: dp_hdfs_datanode
     image: apache/hadoop:3
     command: ["hdfs", "datanode"]
-    # CHẠY BẰNG ROOT
     user: "root"
     environment:
       HDFS_DATANODE_USER: "root"
@@ -324,7 +564,7 @@ services:
     container_name: dp_hms_db
     image: postgres:14
     environment:
-      POSTGRES_DB: metastore          # Đã sửa thành 'metastore'
+      POSTGRES_DB: metastore
       POSTGRES_USER: hive
       POSTGRES_PASSWORD: hive
       POSTGRES_INITDB_ARGS: --data-checksums
@@ -359,7 +599,6 @@ services:
     ports:
       - "9083:9083"
     environment:
-      # Các biến này sẽ được entrypoint.sh sử dụng
       POSTGRES_HOST: hms-db
       POSTGRES_PORT: 5432
       POSTGRES_DB: metastore
@@ -368,9 +607,7 @@ services:
       HDFS_NAMENODE_HOST: namenode
       HDFS_NAMENODE_PORT: 9000
       METASTORE_PORT: 9083
-    # KHÔNG DÙNG 'command' Ở ĐÂY để Docker dùng entrypoint.sh trong image
     volumes:
-      # Mount file cấu hình vào đúng đường dẫn của Image apache/hive
       - ./hive-metastore/conf/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
     healthcheck:
       test: ["CMD-SHELL", "/opt/healthcheck.sh"]
@@ -401,13 +638,11 @@ services:
       - SPARK_MODE=master
       - SPARK_RPC_AUTHENTICATION_ENABLED=yes
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
-      # Bind rõ ràng để tránh lỗi network
       - SPARK_MASTER_HOST=spark-master
     volumes:
       - ./spark/jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
       - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
-    # SỬA LỖI: Chạy class Master thay vì tail -f
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
     networks:
       - jadc2
@@ -432,7 +667,6 @@ services:
       - ./spark/jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
       - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
-    # SỬA LỖI: Chạy class Worker và trỏ về Master
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
     networks:
       - jadc2
@@ -470,7 +704,6 @@ services:
       - |
         source /opt/scripts/get_om_token.sh
 
-        # Kiểm tra xem Token có lấy được không
         if [ -z "$OM_JWT_TOKEN" ]; then
           echo "ERROR: Failed to retrieve OM Token. Exiting."
           exit 1
@@ -526,7 +759,6 @@ services:
       - |
         source /opt/scripts/get_om_token.sh
 
-        # Kiểm tra xem Token có lấy được không
         if [ -z "$OM_JWT_TOKEN" ]; then
           echo "ERROR: Failed to retrieve OM Token. Exiting."
           exit 1
@@ -558,313 +790,3 @@ services:
           /opt/spark/jobs/job2_demo.py
     networks:
       - jadc2
-
-  # ==========================================================================
-  # OPENMETADATA - MYSQL DATABASE
-  # ==========================================================================
-  openmetadata-mysql:
-    container_name: openmetadata_mysql
-    image: docker.getcollate.io/openmetadata/db:1.10.14
-    command: "--sort_buffer_size=10M"
-    restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: password
-    expose:
-      - 3306
-    ports:
-      - "3307:3306"
-    volumes:
-      - om-db-data:/var/lib/mysql
-    networks:
-      - jadc2
-    healthcheck:
-      test: mysql --user=root --password=$$MYSQL_ROOT_PASSWORD --silent --execute "use openmetadata_db"
-      interval: 15s
-      timeout: 10s
-      retries: 10
-
-  # ==========================================================================
-  # OPENMETADATA - ELASTICSEARCH
-  # ==========================================================================
-  openmetadata-elasticsearch:
-    container_name: openmetadata_elasticsearch
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.4
-    environment:
-      - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms1024m -Xmx1024m
-      - xpack.security.enabled=false
-    networks:
-      - jadc2
-    ports:
-      - "9200:9200"
-      - "9300:9300"
-    healthcheck:
-      test: "curl -s http://localhost:9200/_cluster/health?pretty | grep status | grep -qE 'green|yellow' || exit 1"
-      interval: 15s
-      timeout: 10s
-      retries: 10
-    volumes:
-      - om-es-data:/usr/share/elasticsearch/data
-
-  # ==========================================================================
-  # OPENMETADATA - DATABASE MIGRATION
-  # ==========================================================================
-  openmetadata-migrate:
-    container_name: openmetadata_migrate
-    image: docker.getcollate.io/openmetadata/server:1.10.14
-    command: "./bootstrap/openmetadata-ops.sh migrate"
-    environment:
-      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
-      SERVER_PORT: ${SERVER_PORT:-8585}
-      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      MIGRATION_LIMIT_PARAM: ${MIGRATION_LIMIT_PARAM:-1200}
-      
-      # Authentication
-      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
-      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
-      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
-      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
-      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
-      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
-      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
-      
-      # JWT
-      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
-      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
-      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
-      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
-      
-      # Pipeline Service
-      PIPELINE_SERVICE_CLIENT_ENDPOINT: ${PIPELINE_SERVICE_CLIENT_ENDPOINT:-http://openmetadata-ingestion:8080}
-      SERVER_HOST_API_URL: ${SERVER_HOST_API_URL:-http://openmetadata-server:8585/api}
-      
-      # Database
-      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
-      DB_SCHEME: ${DB_SCHEME:-mysql}
-      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
-      DB_USER: ${DB_USER:-openmetadata_user}
-      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
-      DB_HOST: ${DB_HOST:-openmetadata-mysql}
-      DB_PORT: ${DB_PORT:-3306}
-      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
-      
-      # Elasticsearch
-      ELASTICSEARCH_HOST: ${ELASTICSEARCH_HOST:-openmetadata-elasticsearch}
-      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
-      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
-      SEARCH_TYPE: ${SEARCH_TYPE:-"elasticsearch"}
-      
-      # Airflow
-      AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-admin}
-      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
-      FERNET_KEY: ${FERNET_KEY:-jJ/9sz0g0OHxsfxOoSfdFdmk3ysNmPRnH3TUAbz3IHA=}
-      
-      # Secrets Manager
-      SECRET_MANAGER: ${SECRET_MANAGER:-db}
-      
-      # Heap Options
-      OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
-    
-    expose:
-      - 8585
-      - 8586
-    ports:
-      - "8585:8585"
-      - "8586:8586"
-    depends_on:
-      openmetadata-elasticsearch:
-        condition: service_healthy
-      openmetadata-mysql:
-        condition: service_healthy
-    
-    networks:
-      - jadc2
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8586/healthcheck"]
-
-  # ==========================================================================
-  # OPENMETADATA - INGESTION (AIRFLOW)
-  # ==========================================================================
-  openmetadata-ingestion:
-    container_name: openmetadata_ingestion
-    image: docker.getcollate.io/openmetadata/ingestion:1.10.14
-    depends_on:
-      openmetadata-elasticsearch:
-        condition: service_started
-      openmetadata-mysql:
-        condition: service_healthy
-      openmetadata-server:
-        condition: service_started
-    environment:
-      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__OPENMETADATA_AIRFLOW_APIS__DAG_GENERATED_CONFIGS: "/opt/airflow/dag_generated_configs"
-      DB_HOST: ${AIRFLOW_DB_HOST:-openmetadata-mysql}
-      DB_PORT: ${AIRFLOW_DB_PORT:-3306}
-      AIRFLOW_DB: ${AIRFLOW_DB:-airflow_db}
-      DB_SCHEME: ${AIRFLOW_DB_SCHEME:-mysql+mysqldb}
-      DB_USER: ${AIRFLOW_DB_USER:-airflow_user}
-      DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_pass}
-      HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
-    entrypoint: /bin/bash
-    command:
-      - "/opt/airflow/ingestion_dependency.sh"
-    expose:
-      - 8080
-    ports:
-      - "8081:8080"
-    networks:
-      - jadc2
-    volumes:
-      - ingestion-volume-dag-airflow:/opt/airflow/dag_generated_configs
-      - ingestion-volume-dags:/opt/airflow/dags
-      - ingestion-volume-tmp:/tmp
-
-  # ==========================================================================
-  # OPENMETADATA - SERVER
-  # ==========================================================================
-  openmetadata-server:
-    container_name: openmetadata_server
-    restart: always
-    image: docker.getcollate.io/openmetadata/server:1.10.14
-    environment:
-      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
-      SERVER_PORT: ${SERVER_PORT:-8585}
-      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      
-      # Authentication
-      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
-      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
-      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
-      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
-      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
-      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
-      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
-      
-      # JWT
-      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
-      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
-      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
-      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
-      
-      # Pipeline Service
-      PIPELINE_SERVICE_CLIENT_ENDPOINT: ${PIPELINE_SERVICE_CLIENT_ENDPOINT:-http://openmetadata-ingestion:8080}
-      PIPELINE_SERVICE_CLIENT_ENABLED: ${PIPELINE_SERVICE_CLIENT_ENABLED:-true}
-      SERVER_HOST_API_URL: ${SERVER_HOST_API_URL:-http://openmetadata-server:8585/api}
-      
-      # Database
-      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
-      DB_SCHEME: ${DB_SCHEME:-mysql}
-      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
-      DB_USER: ${DB_USER:-openmetadata_user}
-      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
-      DB_HOST: ${DB_HOST:-openmetadata-mysql}
-      DB_PORT: ${DB_PORT:-3306}
-      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
-      
-      # Elasticsearch
-      ELASTICSEARCH_HOST: ${ELASTICSEARCH_HOST:-openmetadata-elasticsearch}
-      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
-      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
-      SEARCH_TYPE: ${SEARCH_TYPE:-"elasticsearch"}
-      
-      # Airflow
-      AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-admin}
-      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
-      FERNET_KEY: ${FERNET_KEY:-jJ/9sz0g0OHxsfxOoSfdFdmk3ysNmPRnH3TUAbz3IHA=}
-      
-      #secretsManagerConfiguration
-      SECRET_MANAGER: ${SECRET_MANAGER:-db}
-      #parameters:
-      OM_SM_REGION: ${OM_SM_REGION:-""}
-      OM_SM_ACCESS_KEY_ID: ${OM_SM_ACCESS_KEY_ID:-""}
-      OM_SM_ACCESS_KEY: ${OM_SM_ACCESS_KEY:-""}
-      
-      #email configuration:
-      OM_EMAIL_ENTITY: ${OM_EMAIL_ENTITY:-"OpenMetadata"}
-      OM_SUPPORT_URL: ${OM_SUPPORT_URL:-"https://slack.open-metadata.org"}
-      AUTHORIZER_ENABLE_SMTP : ${AUTHORIZER_ENABLE_SMTP:-false}
-      OPENMETADATA_SERVER_URL: ${OPENMETADATA_SERVER_URL:-""}
-      OPENMETADATA_SMTP_SENDER_MAIL: ${OPENMETADATA_SMTP_SENDER_MAIL:-""}
-      SMTP_SERVER_ENDPOINT: ${SMTP_SERVER_ENDPOINT:-""}
-      SMTP_SERVER_PORT: ${SMTP_SERVER_PORT:-""}
-      SMTP_SERVER_USERNAME: ${SMTP_SERVER_USERNAME:-""}
-      SMTP_SERVER_PWD: ${SMTP_SERVER_PWD:-""}
-      SMTP_SERVER_STRATEGY: ${SMTP_SERVER_STRATEGY:-"SMTP_TLS"}
-
-      # Heap OPTS Configurations
-      OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
-      # Mask passwords values in UI
-      MASK_PASSWORDS_API: ${MASK_PASSWORDS_API:-false}
-      
-      #OpenMetadata Web Configuration
-      WEB_CONF_URI_PATH: ${WEB_CONF_URI_PATH:-"/api"}
-      #HSTS
-      WEB_CONF_HSTS_ENABLED: ${WEB_CONF_HSTS_ENABLED:-false}
-      WEB_CONF_HSTS_MAX_AGE: ${WEB_CONF_HSTS_MAX_AGE:-"365 days"}
-      WEB_CONF_HSTS_INCLUDE_SUBDOMAINS: ${WEB_CONF_HSTS_INCLUDE_SUBDOMAINS:-"true"}
-      WEB_CONF_HSTS_PRELOAD: ${WEB_CONF_HSTS_PRELOAD:-"true"}
-      #Frame Options
-      WEB_CONF_FRAME_OPTION_ENABLED: ${WEB_CONF_FRAME_OPTION_ENABLED:-false}
-      WEB_CONF_FRAME_OPTION: ${WEB_CONF_FRAME_OPTION:-"SAMEORIGIN"}
-      WEB_CONF_FRAME_ORIGIN: ${WEB_CONF_FRAME_ORIGIN:-""}
-      #Content Type
-      WEB_CONF_CONTENT_TYPE_OPTIONS_ENABLED: ${WEB_CONF_CONTENT_TYPE_OPTIONS_ENABLED:-false}
-      #XSS-Protection  
-      WEB_CONF_XSS_PROTECTION_ENABLED: ${WEB_CONF_XSS_PROTECTION_ENABLED:-false}
-      WEB_CONF_XSS_PROTECTION_ON: ${WEB_CONF_XSS_PROTECTION_ON:-true}
-      WEB_CONF_XSS_PROTECTION_BLOCK: ${WEB_CONF_XSS_PROTECTION_BLOCK:-true}
-      #CSP    
-      WEB_CONF_XSS_CSP_ENABLED: ${WEB_CONF_XSS_CSP_ENABLED:-false}
-      WEB_CONF_XSS_CSP_POLICY: ${WEB_CONF_XSS_CSP_POLICY:-"default-src 'self'"}
-      WEB_CONF_XSS_CSP_REPORT_ONLY_POLICY: ${WEB_CONF_XSS_CSP_REPORT_ONLY_POLICY:-""}
-      #Cache
-      WEB_CONF_CACHE_CONTROL: ${WEB_CONF_CACHE_CONTROL:-""}
-      WEB_CONF_PRAGMA: ${WEB_CONF_PRAGMA:-""}
-    
-    expose:
-      - 8585
-      - 8586
-    ports:
-      - "8585:8585"
-      - "8586:8586"
-    depends_on:
-      openmetadata-elasticsearch:
-        condition: service_healthy
-      openmetadata-mysql:
-        condition: service_healthy
-      openmetadata-migrate:
-        condition: service_completed_successfully
-    networks:
-      - jadc2
-    healthcheck:
-      test: [ "CMD", "wget", "-q", "--spider",  "http://localhost:8586/healthcheck" ]
-      
-#=============================================================================
-# VOLUMES
-# ============================================================================
-volumes:
-  # Existing volumes
-  postgres_source_data:
-  postgres_dest_data:
-  kafka_data:
-  namenode_data:
-  datanode_data:
-  hms_data:
-
-  # OpenMetadata volumes
-  ingestion-volume-dag-airflow:
-  ingestion-volume-dags:
-  ingestion-volume-tmp:
-  om-es-data:
-  om-db-data:
-
-# ============================================================================
-# NETWORKS
-# ============================================================================
-networks:
-  jadc2:
-    name: jadc2
-    driver: bridge
