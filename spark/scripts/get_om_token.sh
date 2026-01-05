@@ -14,7 +14,7 @@ RETRY_DELAY=10
 log_info() { echo -e "$(date '+%Y-%m-%d %H:%M:%S') - [INFO] $1"; }
 log_warn() { echo -e "$(date '+%Y-%m-%d %H:%M:%S') - [WARN] $1"; }
 log_error() { echo -e "$(date '+%Y-%m-%d %H:%M:%S') - [ERROR] $1"; }
-
+source /opt/scripts/get_om_token.sh
 wait_for_openmetadata() {
     log_info "Waiting for OpenMetadata at ${OM_SERVER_URL}..."
     local retry=0

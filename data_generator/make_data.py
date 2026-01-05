@@ -29,22 +29,22 @@ DB_PARAMS = { # need to match the schema in docs
 # Configurable record counts from environment variables
 # if not set, use default values
 # default number rows per table
-RECORD_COUNTS = {
-    'regions': int(os.getenv('REGIONS_COUNT', 50)),
-    'targets': int(os.getenv('TARGETS_COUNT', 200)),
-    'users': int(os.getenv('USERS_COUNT', 30)),
-    'units': int(os.getenv('UNITS_COUNT', 200)),
-    'weapons': int(os.getenv('WEAPONS_COUNT', 400)),
-    'sensors': int(os.getenv('SENSORS_COUNT', 100)),
-    'detections': int(os.getenv('DETECTIONS_COUNT', 1000)),
-    'weather_events': int(os.getenv('WEATHER_EVENTS_COUNT', 200)),
-    'unit_status_updates': int(os.getenv('UNIT_STATUS_UPDATES_COUNT', 1000)),
-    'supply_status': int(os.getenv('SUPPLY_STATUS_COUNT', 200)),
-    'cyber_ew_events': int(os.getenv('CYBER_EW_EVENTS_COUNT', 100)),
-    'engagement_events': int(os.getenv('ENGAGEMENT_EVENTS_COUNT', 200)),
-    'roe_updates': int(os.getenv('ROE_UPDATES_COUNT', 20)),
-    'alerts': int(os.getenv('ALERTS_COUNT', 200)),
-    'commands': int(os.getenv('COMMANDS_COUNT', 200))
+RECORD_COUNTS = { # set it smaller for testing purpose
+    'regions': int(os.getenv('REGIONS_COUNT', 5)),
+    'targets': int(os.getenv('TARGETS_COUNT', 5)),
+    'users': int(os.getenv('USERS_COUNT', 5)),
+    'units': int(os.getenv('UNITS_COUNT', 5)),
+    'weapons': int(os.getenv('WEAPONS_COUNT', 5)),
+    'sensors': int(os.getenv('SENSORS_COUNT', 5)),
+    'detections': int(os.getenv('DETECTIONS_COUNT', 5)),
+    'weather_events': int(os.getenv('WEATHER_EVENTS_COUNT', 5)),
+    'unit_status_updates': int(os.getenv('UNIT_STATUS_UPDATES_COUNT', 5)),
+    'supply_status': int(os.getenv('SUPPLY_STATUS_COUNT', 5)),
+    'cyber_ew_events': int(os.getenv('CYBER_EW_EVENTS_COUNT', 5)),
+    'engagement_events': int(os.getenv('ENGAGEMENT_EVENTS_COUNT', 5)),
+    'roe_updates': int(os.getenv('ROE_UPDATES_COUNT', 5)),
+    'alerts': int(os.getenv('ALERTS_COUNT', 5)),
+    'commands': int(os.getenv('COMMANDS_COUNT', 5))
 }
 
 # ENUM values from schema

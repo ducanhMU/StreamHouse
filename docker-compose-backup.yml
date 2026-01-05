@@ -1,7 +1,262 @@
-version: "3.8"
+version: "3.9"
 
+# ============================================================================
+# VOLUMES
+# ============================================================================
+volumes:
+  # Existing volumes
+  postgres_source_data:
+  postgres_dest_data:
+  kafka_data:
+  namenode_data:
+  datanode_data:
+  hms_data:
+  
+  # OpenMetadata volumes
+  ingestion-volume-dag-airflow:
+  ingestion-volume-dags:
+  ingestion-volume-tmp:
+  es-data:
+  openmetadata-mysql-data:
+
+# ============================================================================
+# NETWORKS
+# ============================================================================
+networks:
+  jadc2:
+    name: jadc2
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: "172.16.240.0/24"
+
+# ============================================================================
+# SERVICES
+# ============================================================================
 services:
-  postgres:
+  # ============================================================================
+  # OPENMETADATA - MySQL Database
+  # ============================================================================
+  openmetadata-mysql:
+    container_name: openmetadata_mysql
+    image: docker.getcollate.io/openmetadata/db:1.11.3
+    command: "--sort_buffer_size=10M"
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+    expose:
+      - 3306
+    ports:
+      - "3307:3306"  # Changed port to avoid conflict
+    volumes:
+      - openmetadata-mysql-data:/var/lib/mysql
+    networks:
+      - jadc2
+    healthcheck:
+      test: mysql --user=root --password=$$MYSQL_ROOT_PASSWORD --silent --execute "use openmetadata_db"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ============================================================================
+  # OPENMETADATA - Elasticsearch
+  # ============================================================================
+  openmetadata-elasticsearch:
+    container_name: openmetadata_elasticsearch
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.4
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1024m -Xmx1024m
+      - xpack.security.enabled=false
+    networks:
+      - jadc2
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    healthcheck:
+      test: "curl -s http://localhost:9200/_cluster/health?pretty | grep status | grep -qE 'green|yellow' || exit 1"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+
+  # ============================================================================
+  # OPENMETADATA - Migration Service
+  # ============================================================================
+  execute-migrate-all:
+    container_name: execute_migrate_all
+    image: docker.getcollate.io/openmetadata/server:1.11.3
+    command: "./bootstrap/openmetadata-ops.sh migrate"
+    environment:
+      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
+      SERVER_PORT: ${SERVER_PORT:-8585}
+      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      
+      MIGRATION_LIMIT_PARAM: ${MIGRATION_LIMIT_PARAM:-1200}
+      
+      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
+      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
+      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
+      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
+      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
+      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
+      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
+      
+      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
+      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
+      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
+      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
+      
+      PIPELINE_SERVICE_CLIENT_ENDPOINT: ${PIPELINE_SERVICE_CLIENT_ENDPOINT:-http://openmetadata-ingestion:8080}
+      SERVER_HOST_API_URL: ${SERVER_HOST_API_URL:-http://openmetadata-server:8585/api}
+      
+      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
+      DB_SCHEME: ${DB_SCHEME:-mysql}
+      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
+      DB_USER: ${DB_USER:-openmetadata_user}
+      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
+      DB_HOST: ${DB_HOST:-openmetadata-mysql}
+      DB_PORT: ${DB_PORT:-3306}
+      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
+      
+      ELASTICSEARCH_HOST: ${ELASTICSEARCH_HOST:-openmetadata-elasticsearch}
+      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
+      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
+      SEARCH_TYPE: ${SEARCH_TYPE:-elasticsearch}
+      
+      PIPELINE_SERVICE_CLIENT_ENABLED: ${PIPELINE_SERVICE_CLIENT_ENABLED:-true}
+      AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+      FERNET_KEY: ${FERNET_KEY:-jJ/9sz0g0OHxsfxOoSfdFdmk3ysNmPRnH3TUAbz3IHA=}
+      
+      SECRET_MANAGER: ${SECRET_MANAGER:-db}
+      OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
+      
+    depends_on:
+      openmetadata-elasticsearch:
+        condition: service_healthy
+      openmetadata-mysql:
+        condition: service_healthy
+    networks:
+      - jadc2
+
+  # ============================================================================
+  # OPENMETADATA - Server
+  # ============================================================================
+  openmetadata-server:
+    container_name: openmetadata_server
+    restart: always
+    image: docker.getcollate.io/openmetadata/server:1.11.3
+    environment:
+      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
+      SERVER_PORT: ${SERVER_PORT:-8585}
+      SERVER_ADMIN_PORT: ${SERVER_ADMIN_PORT:-8586}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      
+      AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
+      AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
+      AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
+      AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
+      AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
+      AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
+      AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
+      
+      RSA_PUBLIC_KEY_FILE_PATH: ${RSA_PUBLIC_KEY_FILE_PATH:-"./conf/public_key.der"}
+      RSA_PRIVATE_KEY_FILE_PATH: ${RSA_PRIVATE_KEY_FILE_PATH:-"./conf/private_key.der"}
+      JWT_ISSUER: ${JWT_ISSUER:-"open-metadata.org"}
+      JWT_KEY_ID: ${JWT_KEY_ID:-"Gb389a-9f76-gdjs-a92j-0242bk94356"}
+      
+      PIPELINE_SERVICE_CLIENT_ENDPOINT: ${PIPELINE_SERVICE_CLIENT_ENDPOINT:-http://openmetadata-ingestion:8080}
+      SERVER_HOST_API_URL: ${SERVER_HOST_API_URL:-http://openmetadata-server:8585/api}
+      
+      DB_DRIVER_CLASS: ${DB_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}
+      DB_SCHEME: ${DB_SCHEME:-mysql}
+      DB_PARAMS: ${DB_PARAMS:-allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC}
+      DB_USER: ${DB_USER:-openmetadata_user}
+      DB_USER_PASSWORD: ${DB_USER_PASSWORD:-openmetadata_password}
+      DB_HOST: ${DB_HOST:-openmetadata-mysql}
+      DB_PORT: ${DB_PORT:-3306}
+      OM_DATABASE: ${OM_DATABASE:-openmetadata_db}
+      
+      ELASTICSEARCH_HOST: ${ELASTICSEARCH_HOST:-openmetadata-elasticsearch}
+      ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT:-9200}
+      ELASTICSEARCH_SCHEME: ${ELASTICSEARCH_SCHEME:-http}
+      SEARCH_TYPE: ${SEARCH_TYPE:-elasticsearch}
+      
+      EVENT_MONITOR: ${EVENT_MONITOR:-prometheus}
+      
+      PIPELINE_SERVICE_CLIENT_ENABLED: ${PIPELINE_SERVICE_CLIENT_ENABLED:-true}
+      AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+      FERNET_KEY: ${FERNET_KEY:-jJ/9sz0g0OHxsfxOoSfdFdmk3ysNmPRnH3TUAbz3IHA=}
+      
+      SECRET_MANAGER: ${SECRET_MANAGER:-db}
+      OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
+    
+    expose:
+      - 8585
+      - 8586
+    ports:
+      - "8585:8585"
+      - "8586:8586"
+    depends_on:
+      openmetadata-elasticsearch:
+        condition: service_healthy
+      openmetadata-mysql:
+        condition: service_healthy
+      execute-migrate-all:
+        condition: service_completed_successfully
+    networks:
+      - jadc2
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "--spider",  "http://localhost:8586/healthcheck" ]
+
+  # ============================================================================
+  # OPENMETADATA - Ingestion (Airflow)
+  # ============================================================================
+  openmetadata-ingestion:
+    container_name: openmetadata_ingestion
+    image: docker.getcollate.io/openmetadata/ingestion:1.11.3
+    depends_on:
+      openmetadata-elasticsearch:
+        condition: service_started
+      openmetadata-mysql:
+        condition: service_healthy
+      openmetadata-server:
+        condition: service_started
+    environment:
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__OPENMETADATA_AIRFLOW_APIS__DAG_GENERATED_CONFIGS: "/opt/airflow/dag_generated_configs"
+      DB_HOST: ${AIRFLOW_DB_HOST:-openmetadata-mysql}
+      DB_PORT: ${AIRFLOW_DB_PORT:-3306}
+      AIRFLOW_DB: ${AIRFLOW_DB:-airflow_db}
+      DB_SCHEME: ${AIRFLOW_DB_SCHEME:-mysql+mysqldb}
+      DB_USER: ${AIRFLOW_DB_USER:-airflow_user}
+      DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_pass}
+      DB_PROPERTIES: ${AIRFLOW_DB_PROPERTIES:-}
+    entrypoint: /bin/bash
+    command:
+      - "/opt/airflow/ingestion_dependency.sh"
+    expose:
+      - 8080
+    ports:
+      - "8087:8080"  # Changed port to avoid conflict
+    networks:
+      - jadc2
+    volumes:
+      - ingestion-volume-dag-airflow:/opt/airflow/dag_generated_configs
+      - ingestion-volume-dags:/opt/airflow/dags
+      - ingestion-volume-tmp:/tmp
+
+  # ============================================================================
+  # SOURCE DATABASE (Có cấu hình WAL cho Debezium + Stats cho OpenMetadata)
+  # ============================================================================
+  postgres-source:
+    container_name: dp_postgres_source
     image: postgres:14
     environment:
       POSTGRES_DB: jadc2_db
@@ -21,12 +276,57 @@ services:
       - "wal_sender_timeout=0"
       - "-c"
       - "max_connections=200"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+      - "-c"
+      - "pg_stat_statements.max=10000"
+      - "-c"
+      - "track_activity_query_size=2048"
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./postgresql/init.sql:/docker-entrypoint-initdb.d/init.sql # for data-generator
-      - ./postgresql/create_publication.sql:/docker-entrypoint-initdb.d/create_publication.sql # for debezium
+      - postgres_source_data:/var/lib/postgresql/data
+      - ./postgresql/init_source.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./postgresql/create_publication.sql:/docker-entrypoint-initdb.d/create_publication.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d jadc2_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jadc2
+    
+  # ============================================================================
+  # DESTINATION DATABASE (Thêm Stats cho OpenMetadata)
+  # ============================================================================
+  postgres-dest:
+    container_name: dp_postgres_dest
+    image: postgres:14
+    environment:
+      POSTGRES_DB: jadc2_db
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_INITDB_ARGS: --data-checksums
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+      - "-c"
+      - "pg_stat_statements.max=10000"
+      - "-c"
+      - "track_activity_query_size=2048"
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_dest_data:/var/lib/postgresql/data
+      - ./postgresql/init_dest.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d jadc2_db"]
       interval: 10s
@@ -35,86 +335,95 @@ services:
     networks:
       - jadc2
 
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.3.0
+  # ============================================================================
+  # DATA GENERATOR
+  # ============================================================================
+  data-generator:
+    container_name: dp_data_generator
+    build:
+      context: ./data_generator
+      dockerfile: Dockerfile
     environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2181:2181"
+      POSTGRES_DB: jadc2_db
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_HOST: postgres-source
+      POSTGRES_PORT: 5432
+      CONTINUOUS_RUN: "true"
+      LOOP_INTERVAL_SECONDS: 300
+    depends_on:
+      postgres-source:
+        condition: service_healthy
     healthcheck:
-      test: echo srvr | nc zookeeper 2181 || exit 1
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      interval: 15s
+      timeout: 10s
+      retries: 10
     networks:
       - jadc2
 
+  # ============================================================================
+  # KAFKA (KRaft mode - no Zookeeper needed)
+  # ============================================================================
   kafka:
-    image: confluentinc/cp-kafka:7.3.0
-    depends_on:
-      zookeeper:
-        condition: service_healthy
+    container_name: dp_kafka
+    image: apache/kafka:latest
     ports:
       - "9092:9092"
       - "29092:29092"
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: CONTROLLER://:9093,PLAINTEXT://:9092,PLAINTEXT_HOST://0.0.0.0:29092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     healthcheck:
-      test: nc -z kafka 9092 || exit 1
+      test: nc -z dp_kafka 9092 || exit 1
       interval: 30s
       timeout: 10s
       retries: 10
       start_period: 60s
-    volumes: # note
+    volumes:
       - kafka_data:/var/lib/kafka/data
     networks:
       - jadc2
 
+  # ============================================================================
+  # DEBEZIUM CDC
+  # ============================================================================
   debezium:
+    container_name: dp_debezium
     image: debezium/connect:2.3
     depends_on:
       kafka:
         condition: service_healthy
-      postgres:
+      postgres-source:
         condition: service_healthy
     ports:
       - "8083:8083"
     environment:
-      # kafka connect settings
       BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: "1"
       CONFIG_STORAGE_TOPIC: connect_configs
       OFFSET_STORAGE_TOPIC: connect_offsets
       STATUS_STORAGE_TOPIC: connect_statuses
-
-      # converters
       KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
-
-      # connect internal topics replication factors
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
-
-      # connect worker task configs
       CONNECT_REST_PORT: 8083
       CONNECT_REST_ADVERTISED_HOST_NAME: debezium
       TASKS_MAX: 1
-
-      # enable debezium scripting
       ENABLE_DEBEZIUM_SCRIPTING: "true"
-
-      # logging
       CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
     volumes:
       - ./debezium/register-postgres.json:/kafka/config/register-postgres.json:ro
@@ -144,17 +453,20 @@ services:
     networks:
       - jadc2
 
-  kafka-ui: # kafka console
+  # ============================================================================
+  # KAFKA UI
+  # ============================================================================
+  kafka-ui:
+    container_name: dp_kafka_ui
     image: provectuslabs/kafka-ui:latest
     depends_on:
       kafka:
         condition: service_healthy
-    ports: 
-      - "8080:8080"
+    ports:
+      - "8088:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
-      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
     healthcheck:
       test: curl -f http://localhost:8080 || exit 1
       interval: 10s
@@ -163,520 +475,318 @@ services:
     networks:
       - jadc2
 
-  data-generator:
-    build:
-      context: ./data_generator
-      dockerfile: Dockerfile
+  # ============================================================================
+  # HDFS CLUSTER
+  # ============================================================================
+  hdfs-namenode:
+    container_name: dp_hdfs_namenode
+    image: apache/hadoop:3
+    hostname: namenode
+    user: "root"
+    command: ["/bin/bash", "-c", "chmod -R 777 /tmp/hadoop-root/dfs/name; if [ ! -d /tmp/hadoop-root/dfs/name/current ]; then echo 'Formatting NameNode...'; hdfs namenode -format -force -nonInteractive; fi; hdfs namenode"]
+    ports:
+      - "9870:9870"
+      - "9003:9000"
     environment:
-      POSTGRES_DB: jadc2_db
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      CONTINUOUS_RUN: "true"
-      LOOP_INTERVAL_SECONDS: 300
+      HDFS_NAMENODE_USER: "root"
+      CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
+      HDFS-SITE.XML_dfs.replication: "1"
+      HDFS-SITE.XML_dfs.namenode.name.dir: "/tmp/hadoop-root/dfs/name"
+    volumes:
+      - namenode_data:/tmp/hadoop-root/dfs/name
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9870 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - jadc2
+
+  hdfs-datanode:
+    container_name: dp_hdfs_datanode
+    image: apache/hadoop:3
+    command: ["hdfs", "datanode"]
+    user: "root"
+    environment:
+      HDFS_DATANODE_USER: "root"
+      CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
+      HDFS-SITE.XML_dfs.replication: "1"
+    volumes:
+      - datanode_data:/tmp/hadoop-root/dfs/data
     depends_on:
-      postgres:
+      hdfs-namenode:
         condition: service_healthy
     networks:
       - jadc2
 
-  spark-master:
-    build:
-      context: ./spark
-      dockerfile: Dockerfile
-    container_name: spark-master
-    hostname: spark-master
-    depends_on:
-      - minio
-      - hms
+  hdfs-resourcemanager:
+    container_name: dp_hdfs_resourcemanager
+    image: apache/hadoop:3
+    hostname: resourcemanager
+    command: ["yarn", "resourcemanager"]
+    user: "root"
     ports:
-      - "7077:7077"
-      - "8082:8080" # avoid conflict port
+      - "8089:8088"
     environment:
-      - SPARK_MODE=master
-      - SPARK_MASTER_HOST=spark-master       # broadcast cho client thấy
-      - SPARK_MASTER_PORT=7077
-      - SPARK_RPC_AUTHENTICATION_ENABLED=yes
-      - SPARK_RPC_AUTHENTICATION_SECRET=my-secret
-      # Hadoop S3A (data plane)
-      - fs.s3a.endpoint=http://minio:9000
-      - fs.s3a.path.style.access=true
-      - fs.s3a.access.key=admin
-      - fs.s3a.secret.key=password
-      - fs.s3a.connection.ssl.enabled=false
+      YARN_RESOURCEMANAGER_USER: "root"
+      CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
+      HDFS-SITE.XML_dfs.replication: "1"
+      YARN-SITE.XML_yarn.resourcemanager.hostname: "resourcemanager"
     volumes:
-      - ./jobs:/opt/bitnami/spark/jobs:ro
-      - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
-    networks:
-      - jadc2
-
-  spark-worker:  
-    build:
-      context: ./spark
-      dockerfile: Dockerfile
-    container_name: spark-worker
-    hostname: spark-worker
+    #  - ./test.sh:/opt/test.sh
     depends_on:
-      - spark-master
-    ports:
-      - "8084:8081" # avoid conflict port
-    environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_CORES=1
-      - SPARK_WORKER_MEMORY=1g
-      - SPARK_WORKER_HOSTNAME=spark-worker
-      # Thêm các dòng sau cho xác thực RPC
-      - SPARK_RPC_AUTHENTICATION_ENABLED=yes
-      - SPARK_RPC_AUTHENTICATION_SECRET=my-secret
-      # Hadoop S3A (data plane)
-      - fs.s3a.endpoint=http://minio:9000
-      - fs.s3a.path.style.access=true
-      - fs.s3a.access.key=admin
-      - fs.s3a.secret.key=password
-      - fs.s3a.connection.ssl.enabled=false
-    volumes:
-      - ./jobs:/opt/bitnami/spark/jobs:ro
-      - ./flink/conf/hive-site.xml:/opt/flink/conf/hive-site.xml:ro
-    networks:
-      - jadc2
-
-  jobmanager: # flink jobmanager
-    build:
-      context: ./flink
-      dockerfile: Dockerfile
-    ports:
-      - "6123:6123" # Flink RPC
-      - "8081:8081"   # Flink Web UI
-    command: jobmanager
-    environment:
-      - |
-        FLINK_PROPERTIES=
-        jobmanager.rpc.address: jobmanager
-    depends_on:
-      kafka:
+      hdfs-namenode:
         condition: service_healthy
-      hms:
-        condition: service_started
-    volumes:
-      - ./flink/conf/hive-site.xml:/opt/flink/conf/hive-site.xml:ro
     networks:
       - jadc2
 
-  taskmanager: # flink task manager
-    build:
-      context: ./flink
-      dockerfile: Dockerfile
-    depends_on:
-      - jobmanager
-    command: taskmanager
+  hdfs-nodemanager:
+    container_name: dp_hdfs_nodemanager
+    image: apache/hadoop:3
+    command: ["yarn", "nodemanager"]
+    user: "root"
     environment:
-      - |
-        FLINK_PROPERTIES=
-        jobmanager.rpc.address: jobmanager
-        taskmanager.numberOfTaskSlots: 20
-    volumes:
-      - ./flink/conf/hive-site.xml:/opt/flink/conf/hive-site.xml:ro
-    networks:
-      - jadc2
-
-  sql-client: # flink sql client
-    build:
-      context: ./flink
-      dockerfile: Dockerfile
+      YARN_NODEMANAGER_USER: "root"
+      CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
+      HDFS-SITE.XML_dfs.replication: "1"
+      YARN-SITE.XML_yarn.resourcemanager.hostname: "resourcemanager"
     depends_on:
-      - jobmanager
-    entrypoint: >
-      /bin/bash -c "
-      echo 'Waiting for JobManager RPC...'; while ! nc -z jobmanager 6123; do sleep 1; done;
-      echo 'All services ready. Launching SQL Client...';
-      /opt/flink/bin/sql-client.sh -Dexecution.target=remote -Djobmanager.rpc.address=jobmanager -Djobmanager.rpc.port=6123 -f /opt/flink/kafka_to_kafka.sql
-      "
-    volumes:
-      - ./flink/conf/hive-site.xml:/opt/flink/conf/hive-site.xml:ro
-      - ./flink/kafka_to_iceberg.sql:/opt/flink/kafka_to_iceberg.sql:ro
-      - ./flink/kafka_to_kafka.sql:/opt/flink/kafka_to_kafka.sql:ro
+      hdfs-namenode:
+        condition: service_healthy
     networks:
-      - jadc2
+      - jadc2   
 
-  hms-db: # hive-metastore backend db
+  # ============================================================================
+  # HIVE METASTORE DATABASE (PostgreSQL)
+  # ============================================================================
+  hms-db:
+    container_name: dp_hms_db
     image: postgres:14
     environment:
-      POSTGRES_DB: hms
+      POSTGRES_DB: metastore
       POSTGRES_USER: hive
       POSTGRES_PASSWORD: hive
       POSTGRES_INITDB_ARGS: --data-checksums
       POSTGRES_HOST_AUTH_METHOD: trust
     command: ["postgres", "-c", "wal_level=logical"]
     ports:
-      - "5433:5432"
-    volumes: # persist data
+      - "5435:5432"
+    volumes:
       - hms_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hive -d hms"]
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
       - jadc2
 
+  # ============================================================================
+  # HIVE METASTORE SERVICE
+  # ============================================================================
   hms:
+    container_name: hms
     build:
       context: ./hive-metastore
       dockerfile: Dockerfile
     hostname: hms
     depends_on:
-      minio:
+      hdfs-namenode:
         condition: service_healthy
       hms-db:
         condition: service_healthy
     ports:
       - "9083:9083"
     environment:
-      HMS_LOGLEVEL: INFO
-      HIVE_METASTORE_JDBC_URL: "jdbc:postgresql://hms-db:5432/hms"
-      HIVE_METASTORE_USER: "hive"
-      HIVE_METASTORE_PASSWORD: "hive"
-    command: >
-      bash -c "
-        /opt/hive-metastore/bin/schematool -dbType postgres -info -userName hive -passWord hive -url jdbc:postgresql://hms-db:5432/hms >/dev/null 2>&1 ||
-        /opt/hive-metastore/bin/schematool -dbType postgres -initSchema -userName hive -passWord hive -url jdbc:postgresql://hms-db:5432/hms;
-        /opt/hive-metastore/bin/hive --service metastore
-      "
-
+      POSTGRES_HOST: hms-db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+      HDFS_NAMENODE_HOST: namenode
+      HDFS_NAMENODE_PORT: 9000
+      METASTORE_PORT: 9083
     volumes:
-      - ./hive-metastore/conf/hive-site.xml:/opt/hive-metastore/conf/hive-site.xml:ro
+      - ./hive-metastore/conf/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
     healthcheck:
-      test: ["CMD-SHELL", "nc -z hms 9083 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - jadc2
-
-  minio:
-    image: minio/minio
-    environment:
-      MINIO_ROOT_USER: admin
-      MINIO_ROOT_PASSWORD: password
-    ports:
-      - "9001:9001"
-      - "9000:9000"
-    command: ["server", "/data", "--console-address", ":9001"]
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - jadc2
-
-  mc:
-    image: minio/mc
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER:-admin} ${MINIO_ROOT_PASSWORD:-password};
-      mc mb -p myminio/warehouse || true;
-      mc ls myminio/warehouse;
-      tail -f /dev/null
-      "
-    networks:
-      - jadc2
-
-  pinot-zookeeper:
-    image: zookeeper:3.9.2
-    container_name: pinot-zookeeper
-    hostname: pinot-zookeeper
-    restart: unless-stopped
-    ports:
-      - "2182:2181" # avoid conflict with another zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    healthcheck:
-      test: echo srvr | nc pinot-zookeeper 2181 || exit 1
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - jadc2
-
-  pinot-controller:
-    image: apachepinot/pinot:1.3.0
-    container_name: pinot-controller
-    restart: unless-stopped
-    entrypoint: [ "sh", "-c" ]
-    command: |
-      "
-        /opt/pinot/bin/pinot-admin.sh StartController -zkAddress pinot-zookeeper:2181 &
-        sleep 15;
-        chmod +x /opt/pinot/configs/register_pinot.sh;
-        sh /opt/pinot/configs/register_pinot.sh;
-        wait
-      "
-    depends_on:
-      pinot-zookeeper:
-        condition: service_healthy
-    ports:
-      - "9002:9000" # avoid conflict with minio web ui
-    volumes:
-      - ./pinot:/opt/pinot/configs
-    environment:  
-      # Enable Basic Authentication for Controller  
-      - controller.admin.access.control.factory.clas 10+s=org.apache.pinot.controller.api.access.BasicAuthAccessControlFactory
-      - controller.admin.access.control.principals=admin,superset
-      - controller.admin.access.control.principals.admin.password=password
-      - controller.admin.access.control.principals.superset.password=password
-      - controller.admin.access.control.principals.superset.permissions=read
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - jadc2
-
-  pinot-broker:
-    image: apachepinot/pinot:1.3.0
-    command: "StartBroker -zkAddress pinot-zookeeper:2181"
-    container_name: pinot-broker
-    restart: unless-stopped
-    depends_on:
-      pinot-zookeeper:
-        condition: service_healthy
-    ports:
-      - "8099:8099"
-    environment:  
-      # Enable Basic Authentication for Broker  
-      - pinot.broker.access.control.class=org.apache.pinot.broker.broker.BasicAuthAccessControlFactory
-      - pinot.broker.access.control.principals=admin,superset
-      - pinot.broker.access.control.principals.admin.password=password
-      - pinot.broker.access.control.principals.superset.password=password
-      - pinot.broker.access.control.principals.superset.permissions=read
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8099/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - jadc2
-
-  pinot-server:
-    image: apachepinot/pinot:1.3.0
-    command: >
-      StartServer -zkAddress pinot-zookeeper:2181
-      -serverHost pinot-server
-      -serverPort 8098
-      -serverAdminPort 8097
-    container_name: pinot-server
-    hostname: pinot-server
-    restart: unless-stopped
-    depends_on:
-      pinot-zookeeper:
-        condition: service_healthy
-    ports:
-      - "8098:8098"
-      - "8097:8097"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8097/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    volumes:
-      - pinot_server_data:/var/pinot/data
-    networks:
-      jadc2:
-        aliases:
-          - pinot-server
-
-  pinot-minion:
-    image: apachepinot/pinot:1.3.0
-    command: "StartMinion -zkAddress pinot-zookeeper:2181"
-    container_name: pinot-minion
-    restart: unless-stopped
-    depends_on:
-      pinot-zookeeper:
-        condition: service_healthy
-    volumes:
-      - pinot_minion_data:/var/pinot/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9514/health || exit 1"]
+      test: ["CMD-SHELL", "/opt/healthcheck.sh"]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 10s
+      retries: 3
     networks:
       - jadc2
-  superset:
-    image: apachepinot/pinot-superset:latest
-    container_name: jadc2-superset
+
+  # ============================================================================
+  # SPARK CLUSTER
+  # ============================================================================
+  spark-master:
+    container_name: dp_spark_master
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    hostname: spark-master
     depends_on:
-      - pinot-broker
+      hdfs-namenode:
+        condition: service_healthy
+      hms:
+        condition: service_healthy
     ports:
-      - "8088:8088"
+      - "7077:7077"
+      - "8082:8080"
     environment:
-      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-g0/z2KTBZBygSjh/D5t527EbGu6q1Sl7mC0IKXcZD8oo5uKLo3RqmWbR}
-      
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=yes
+      - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
+      - SPARK_MASTER_HOST=spark-master
     volumes:
-      - superset_home:/app/superset_home
-    command: >
-      bash -c "
-      superset db upgrade &&
-      superset fab create-admin --username admin --firstname Superset --lastname Admin --email admin@example.com --password admin || true &&
-      superset init &&
-      superset run -h 0.0.0.0 -p 8088 --with-threads --reload
-      "
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8088 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - ./spark/jobs:/opt/spark/jobs:ro
+      - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
     networks:
       - jadc2
 
-  # airflow-db:
-  #     image: postgres:14
-  #     container_name: jadc2-airflow-db
-  #     environment:
-  #       POSTGRES_DB: airflow
-  #       POSTGRES_USER: ${AIRFLOW_USER:-airflow}
-  #       POSTGRES_PASSWORD: ${AIRFLOW_PASSWORD:-airflow}
-  #     volumes:
-  #       - airflow_postgres_data:/var/lib/postgresql/data
-  #     healthcheck:
-  #       test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_USER:-airflow} -d airflow"]
-  #       interval: 10s
-  #       timeout: 5s
-  #       retries: 5
-  #     networks:
-  #       - jadc2_network
+  spark-worker:  
+    container_name: dp_spark_worker
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    hostname: spark-worker
+    depends_on:
+      - spark-master
+    ports:
+      - "8084:8081"
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_WORKER_CORES=4
+      - SPARK_WORKER_MEMORY=4g
+      - SPARK_RPC_AUTHENTICATION_ENABLED=yes
+      - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs:ro
+      - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    networks:
+      - jadc2
 
-  # airflow-webserver:
-  #   build:
-  #     context: ./airflow
-  #     dockerfile: Dockerfile
-  #   container_name: jadc2-airflow-webserver
-  #   depends_on:
-  #     airflow-db:
-  #       condition: service_healthy
-  #   environment:
-  #     AIRFLOW__CORE__EXECUTOR: SequentialExecutor
-  #     AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_USER:-airflow}:${AIRFLOW_PASSWORD:-airflow}@jadc2-airflow-db:5432/airflow
-  #     AIRFLOW__WEBSERVER__PORT: 8082
-  #     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-  #     AIRFLOW__CORE__FERNET_KEY: "VKgYkKkKI8G5bxqJd2aTVvGgugpNElZkIhF0ZVwMPs0="
-  #     AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: "Asia/Ho_Chi_Minh"
-  #   ports:
-  #     - "8082:8080" # 8082 ?
-  #   volumes:
-  #     - ./airflow/dags:/opt/airflow/dags
-  #     - ./dbt/dremio_dbt:/opt/airflow/dbt # dremio ?
-  #     - ./airflow/plugins:/opt/airflow/plugins
-  #     - ./airflow/logs:/opt/airflow/logs
-  #   command: >
-  #     bash -c "airflow db upgrade && \
-  #              airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true && \
-  #              airflow webserver -p 8082"
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "curl -f http://localhost:8082/health || exit 1"]
-  #     interval: 10s
-  #     timeout: 10s
-  #     retries: 5
-  #   networks:
-  #     - jadc2_network
+  # ============================================================================
+  # SPARK JOBS
+  # ============================================================================
+  spark-job-ingest:
+    container_name: dp_spark_ingest
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    depends_on:
+      spark-master:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      hms:
+        condition: service_healthy
+      openmetadata-server:
+        condition: service_started
+    environment:
+      - SPARK_RPC_AUTHENTICATION_ENABLED=yes
+      - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
+      - HADOOP_USER_NAME=root
+      - OM_SERVER_HOST=openmetadata-server
+    volumes:
+      - ./spark/scripts:/opt/scripts:ro
+      - ./spark/jobs:/opt/spark/jobs:ro
+      - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    command:
+      - bash
+      - -c
+      - |
+        source /opt/scripts/get_om_token.sh
 
-  # airflow-scheduler:
-  #   build:
-  #     context: ./airflow
-  #     dockerfile: Dockerfile
-  #   container_name: jadc2-airflow-scheduler
-  #   depends_on:
-  #     airflow-db:
-  #       condition: service_healthy
-  #   environment:
-  #     AIRFLOW__CORE__EXECUTOR: SequentialExecutor
-  #     AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_USER:-airflow}:${AIRFLOW_PASSWORD:-airflow}@jadc2-airflow-db:5432/airflow
-  #     AIRFLOW__CORE__FERNET_KEY: "VKgYkKkKI8G5bxqJd2aTVvGgugpNElZkIhF0ZVwMPs0="
-  #     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-  #     AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: "Asia/Ho_Chi_Minh"
-  #   volumes:
-  #     - ./airflow/dags:/opt/airflow/dags
-  #     - ./dbt/dremio_dbt:/opt/airflow/dbt # dremio ?
-  #     - ./airflow/plugins:/opt/airflow/plugins
-  #     - ./airflow/logs:/opt/airflow/logs
-  #   command: bash -c "airflow db upgrade && airflow scheduler"
-  #   networks:
-  #     - jadc2_network
+        if [ -z "$OM_JWT_TOKEN" ]; then
+          echo "ERROR: Failed to retrieve OM Token. Exiting."
+          exit 1
+        fi
+        echo "Token retrieved successfully."
 
-  # chatbot:
-  #   build:
-  #     context: ./chatbot_clickhouse
-  #     dockerfile: Dockerfile
-  #   container_name: jadc2-chatbot
-  #   depends_on:
-  #     clickhouse:
-  #       condition: service_healthy
-  #   ports:
-  #     - "8000:8000"
-  #   environment:
-  #     CLICKHOUSE_HOST: jadc2-clickhouse
-  #     CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
-  #     CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-password}
-  #     CLICKHOUSE_PORT: 8123
-  #   volumes:
-  #     - ./chatbot_clickhouse/chat_ui.py:/app/chat_ui.py
-  #     - ./chatbot_clickhouse/langchain_cli.py:/app/langchain_cli.py
-  #     - ./chatbot_clickhouse/requirements.txt:/app/requirements.txt
-  #   command: >
-  #     bash -c "pip install -r /app/requirements.txt && python /app/chat_ui.py"
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "curl -f http://localhost:8000 || exit 1"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
-  #   networks:
-  #     - jadc2_network
+        echo 'Waiting for Spark Master...'
+        while ! nc -z spark-master 7077; do sleep 2; done
 
-  
+        echo 'Waiting for Kafka...'
+        while ! nc -z kafka 9092; do sleep 2; done
+        
+        echo 'Submitting Ingestion Job...'
+        /opt/spark/bin/spark-submit \
+          --master spark://spark-master:7077 \
+          --name 'Job1_Ingest_Kafka_To_HDFS' \
+          --deploy-mode client \
+          --conf spark.hadoop.hive.metastore.uris=thrift://hms:9083 \
+          --conf spark.cores.max=2 \
+          --conf spark.executor.memory=1500m \
+          --conf spark.openmetadata.identity.authorization.token="$OM_JWT_TOKEN" \
+          /opt/spark/jobs/job1_demo.py
+    networks:
+      - jadc2
 
-  # chatbot-pinot:
-  #   build: ./chatbot_pinot
-  #   container_name: chatbot-pinot
-  #   environment:
-  #     PINOT_BROKER: pinot-broker
-  #     PINOT_PORT: 8099
-  #   volumes:
-  #     - ./chatbot_pinot:/usr/src/app
-  #   working_dir: /usr/src/app
-  #   command: ["python", "app.py"]
-  #   depends_on:
-  #     - pinot-broker
-  #   ports:
-  #     - "8501:8501"
-  #   networks:
-  #     - jadc2_network
+  spark-job-process:
+    container_name: dp_spark_process
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    depends_on:
+      spark-master:
+        condition: service_started
+      hms:
+        condition: service_healthy
+      postgres-dest:
+        condition: service_healthy
+      openmetadata-server:
+        condition: service_started
+    environment:
+      - SPARK_RPC_AUTHENTICATION_ENABLED=yes
+      - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
+      - HADOOP_USER_NAME=root
+      - OM_SERVER_HOST=openmetadata-server
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs:ro
+      - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - ./spark/scripts:/opt/spark/scripts:ro
+    command:
+      - bash
+      - -c
+      - |
+        source /opt/scripts/get_om_token.sh
 
-volumes:
-  postgres_data:
-  kafka_data:
-  minio_data:
-  hms_data:
-  pinot_minion_data:
-  pinot_server_data:
-  # dremio_data:
-  # dremio_conf:
-  # airflow_postgres_data:
-  # clickhouse_data:
-  superset_home:
+        if [ -z "$OM_JWT_TOKEN" ]; then
+          echo "ERROR: Failed to retrieve OM Token. Exiting."
+          exit 1
+        fi
+        echo "Token retrieved successfully."
+        
+        echo 'Waiting for Spark Master...'
+        while ! nc -z spark-master 7077; do sleep 2; done
+        
+        echo 'Waiting for Postgres Destination...'
+        while ! nc -z postgres-dest 5432; do sleep 2; done
 
-networks:
-  jadc2:
-    name: jadc2
-    driver: bridge
-
+        echo 'Checking Data Availability (Silver Layer)...'
+        
+        until /opt/spark/bin/spark-submit --master local[*] /opt/spark/scripts/check_hdfs_path.py "hdfs://namenode:9000/data/delta/silver/regions/_delta_log"; do
+          echo 'Silver data not found yet. Sleeping 20s...'
+          sleep 20
+        done
+        
+        echo 'Data Found! Submitting Processing Job...'
+        /opt/spark/bin/spark-submit \
+          --master spark://spark-master:7077 \
+          --name 'Job2_Process_HDFS_To_Postgres' \
+          --deploy-mode client \
+          --conf spark.hadoop.hive.metastore.uris=thrift://hms:9083 \
+          --conf spark.cores.max=2 \
+          --conf spark.executor.memory=1500m \
+          --conf spark.openmetadata.identity.authorization.token="$OM_JWT_TOKEN" \
+          /opt/spark/jobs/job2_demo.py
+    networks:
+      - jadc2

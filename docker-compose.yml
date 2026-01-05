@@ -1,23 +1,95 @@
 version: "3.9"
-
 # ============================================================================
-# VOLUMES
+# VOLUMES CONFIGURATION (MAPPED TO /drive1)
 # ============================================================================
 volumes:
-  # Existing volumes
+  # 1. Postgres Source
   postgres_source_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/postgres_source_data
+
+  # 2. Postgres Dest
   postgres_dest_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/postgres_dest_data
+
+  # 3. Kafka
   kafka_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/kafka_data
+
+  # 4. HDFS Namenode
   namenode_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/namenode_data
+
+  # 5. HDFS Datanode
   datanode_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/datanode_data
+
+  # 6. Hive Metastore DB
   hms_data:
-  
-  # OpenMetadata volumes
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/hms_data
+
+  # 7. OpenMetadata - Ingestion Airflow Config
   ingestion-volume-dag-airflow:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/ingestion-volume-dag-airflow
+
+  # 8. OpenMetadata - Ingestion DAGs
   ingestion-volume-dags:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/ingestion-volume-dags
+
+  # 9. OpenMetadata - Ingestion Tmp
   ingestion-volume-tmp:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/ingestion-volume-tmp
+
+  # 10. OpenMetadata - Elasticsearch
   es-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/es-data
+
+  # 11. OpenMetadata - MySQL
   openmetadata-mysql-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /drive1/docker_volumes/openmetadata-mysql-data
 
 # ============================================================================
 # NETWORKS
@@ -26,10 +98,6 @@ networks:
   jadc2:
     name: jadc2
     driver: bridge
-    ipam:
-      driver: default
-      config:
-        - subnet: "172.16.240.0/24"
 
 # ============================================================================
 # SERVICES
@@ -40,7 +108,7 @@ services:
   # ============================================================================
   openmetadata-mysql:
     container_name: openmetadata_mysql
-    image: docker.getcollate.io/openmetadata/db:1.11.3
+    image: docker.getcollate.io/openmetadata/db:1.11.4
     command: "--sort_buffer_size=10M"
     restart: always
     environment:
@@ -87,7 +155,7 @@ services:
   # ============================================================================
   execute-migrate-all:
     container_name: execute_migrate_all
-    image: docker.getcollate.io/openmetadata/server:1.11.3
+    image: docker.getcollate.io/openmetadata/server:1.11.4
     command: "./bootstrap/openmetadata-ops.sh migrate"
     environment:
       OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
@@ -149,7 +217,7 @@ services:
   openmetadata-server:
     container_name: openmetadata_server
     restart: always
-    image: docker.getcollate.io/openmetadata/server:1.11.3
+    image: docker.getcollate.io/openmetadata/server:1.11.4
     environment:
       OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
       SERVER_PORT: ${SERVER_PORT:-8585}
@@ -219,7 +287,7 @@ services:
   # ============================================================================
   openmetadata-ingestion:
     container_name: openmetadata_ingestion
-    image: docker.getcollate.io/openmetadata/ingestion:1.11.3
+    image: docker.getcollate.io/openmetadata/ingestion:1.11.4
     depends_on:
       openmetadata-elasticsearch:
         condition: service_started
@@ -463,7 +531,7 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "8086:8080"
+      - "8088:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
@@ -527,14 +595,14 @@ services:
     command: ["yarn", "resourcemanager"]
     user: "root"
     ports:
-      - "8088:8088"
+      - "8089:8088"
     environment:
       YARN_RESOURCEMANAGER_USER: "root"
       CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
       HDFS-SITE.XML_dfs.replication: "1"
       YARN-SITE.XML_yarn.resourcemanager.hostname: "resourcemanager"
     volumes:
-      - ./test.sh:/opt/test.sh
+    #  - ./test.sh:/opt/test.sh
     depends_on:
       hdfs-namenode:
         condition: service_healthy
