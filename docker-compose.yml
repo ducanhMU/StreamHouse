@@ -759,6 +759,7 @@ services:
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
       - HADOOP_USER_NAME=root
       - OM_SERVER_HOST=openmetadata-server
+      - OM_JWT_TOKEN=${OM_JWT_TOKEN}
     volumes:
       - ./spark/scripts:/opt/scripts:ro
       - ./spark/jobs:/opt/spark/jobs:ro
@@ -768,14 +769,6 @@ services:
       - bash
       - -c
       - |
-        source /opt/scripts/get_om_token.sh
-
-        if [ -z "$OM_JWT_TOKEN" ]; then
-          echo "ERROR: Failed to retrieve OM Token. Exiting."
-          exit 1
-        fi
-        echo "Token retrieved successfully."
-
         echo 'Waiting for Spark Master...'
         while ! nc -z spark-master 7077; do sleep 2; done
 
@@ -814,6 +807,7 @@ services:
       - SPARK_RPC_AUTHENTICATION_SECRET=jadc2-secret
       - HADOOP_USER_NAME=root
       - OM_SERVER_HOST=openmetadata-server
+      - OM_JWT_TOKEN=${OM_JWT_TOKEN}
     volumes:
       - ./spark/jobs:/opt/spark/jobs:ro
       - ./spark/conf/hive-site.xml:/opt/spark/conf/hive-site.xml:ro
@@ -823,14 +817,6 @@ services:
       - bash
       - -c
       - |
-        source /opt/scripts/get_om_token.sh
-
-        if [ -z "$OM_JWT_TOKEN" ]; then
-          echo "ERROR: Failed to retrieve OM Token. Exiting."
-          exit 1
-        fi
-        echo "Token retrieved successfully."
-        
         echo 'Waiting for Spark Master...'
         while ! nc -z spark-master 7077; do sleep 2; done
         
