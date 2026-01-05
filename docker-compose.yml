@@ -601,8 +601,6 @@ services:
       CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
       HDFS-SITE.XML_dfs.replication: "1"
       YARN-SITE.XML_yarn.resourcemanager.hostname: "resourcemanager"
-    volumes:
-    #  - ./test.sh:/opt/test.sh
     depends_on:
       hdfs-namenode:
         condition: service_healthy

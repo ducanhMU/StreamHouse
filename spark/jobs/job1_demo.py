@@ -3,7 +3,7 @@ Spark Job 1: Bronze to Silver Layer (Throttled Micro-batch)
 ------------------------------------------------------------
 Mode: Structured Streaming
 Frequency: Every 1 minute
-Batch Size: Max 50 records per trigger (Very Low Load)
+Batch Size: Max 5 records per trigger (Very Low Load)
 Logic: UPSERT (Merge) to keep Silver tables synchronized
 ------------------------------------------------------------
 """
@@ -185,13 +185,13 @@ def start_stream_for_table(spark, table_name, schema):
     logger.info(f"Initializing stream for: {table_name}")
 
     # 1. READ STREAM (With Constraints)
-    # maxOffsetsPerTrigger=50 ensures we only read 50 messages at a time
+    # maxOffsetsPerTrigger=5 ensures we only read 5 messages at a time
     raw_stream = (spark.readStream
         .format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", topic_name)
         .option("startingOffsets", "earliest")
-        .option("maxOffsetsPerTrigger", 50) # <--- LIMIT 50 MESSAGES
+        .option("maxOffsetsPerTrigger", 5) # <--- LIMIT 5 MESSAGES
         .option("failOnDataLoss", "false")
         .load())
 
@@ -296,7 +296,7 @@ def main():
         else:
             logger.error(f"No schema defined for {table}")
 
-    logger.info(f"Running {len(active_streams)} streams. (1 min trigger, 50 msg limit per batch)")
+    logger.info(f"Running {len(active_streams)} streams. (1 min trigger, 5 msg limit per batch)")
     
     try:
         spark.streams.awaitAnyTermination()

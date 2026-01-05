@@ -2,7 +2,7 @@
 Spark Job 2 DEMO: Silver to Gold (Lineage-Enabled Simulation)
 -----------------------------------------------------------------------
 LOGIC:
-1. INPUT: Reads 50 rows from ACTUAL Silver tables (HDFS) to trigger Lineage.
+1. INPUT: Reads 5 rows from ACTUAL Silver tables (HDFS) to trigger Lineage.
 2. COMPUTE: Takes the primary table, fills missing 'join' columns with 
             random data to guarantee valid Gold output.
 3. OUTPUT: TRUNCATES and INSERTs rows into PostgreSQL (Overwrite Mode).
@@ -37,7 +37,7 @@ POSTGRES_PROPS = {
 
 # DEMO CONFIG
 LOOP_INTERVAL_SECONDS = 60
-DEMO_ROW_LIMIT = 50 
+DEMO_ROW_LIMIT = 5 
 
 # ==========================================
 # TYPE SAFETY CONSTANTS
@@ -79,7 +79,7 @@ def create_spark_session():
 
 def read_silver_limit(spark, table_name):
     """
-    Reads Silver table from HDFS (Triggering Input Lineage) and limits to 50 rows.
+    Reads Silver table from HDFS (Triggering Input Lineage) and limits to 5 rows.
     """
     path = f"{HDFS_SILVER_PATH}/{table_name}"
     try:
@@ -90,7 +90,7 @@ def read_silver_limit(spark, table_name):
         elif "created_at" in df.columns:
             df = df.orderBy(F.col("created_at").desc())
             
-        # Limit to 50 rows
+        # Limit to 5 rows
         return df.limit(DEMO_ROW_LIMIT)
     except Exception:
         logger.warning(f"Silver table '{table_name}' not found. Returning empty DF.")
@@ -239,7 +239,7 @@ def process_threat_assessment(spark):
         rand_enum(ENUM_OPTS["iff"]).alias("iff_status"),
         rand_val(0.5, 1.0).alias("adjusted_confidence"),
         rand_enum(ENUM_OPTS["threat"]).alias("predicted_threat"),
-        rand_val(0.0, 5000.0).alias("distance_km"),
+        rand_val(0.0, 500.0).alias("distance_km"),
         rand_val(0.0, 600.0).alias("response_time_sec"),
         F.current_timestamp().alias("event_time")
     )
@@ -292,7 +292,7 @@ def process_logistics_readiness(spark):
     df = supply.select(
         F.col("unit_id"), # Real ID
         rand_uuid().alias("region_id"),
-        F.coalesce(F.col("supply_level"), F.lit(50.0)).alias("supply_level"),
+        F.coalesce(F.col("supply_level"), F.lit(5.0)).alias("supply_level"),
         (F.col("supply_level") * 0.8).alias("projected_supply"),
         F.lit(1).alias("resupply_feasibility"),
         F.current_timestamp().alias("event_time")
@@ -340,7 +340,7 @@ def process_engagement_analysis(spark):
 def main():
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
-    logger.info("Spark Session Initialized (DEMO MODE: Read 50 rows -> Mock Compute -> Postgres).")
+    logger.info("Spark Session Initialized (DEMO MODE: Read 5 rows -> Mock Compute -> Postgres).")
 
     try:
         while True:
