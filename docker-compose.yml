@@ -783,7 +783,10 @@ services:
           --conf spark.hadoop.hive.metastore.uris=thrift://hms:9083 \
           --conf spark.cores.max=2 \
           --conf spark.executor.memory=1500m \
-          --conf spark.openmetadata.identity.authorization.token="$OM_JWT_TOKEN" \
+          --conf spark.extraListeners=io.openlineage.spark.agent.OpenLineageSparkListener \
+          --conf spark.openmetadata.transport.hostPort=http://openmetadata-server:8585/api \
+          --conf spark.openmetadata.transport.type=openmetadata \
+          --conf spark.openmetadata.transport.jwtToken="$OM_JWT_TOKEN" \
           /opt/spark/jobs/job1_demo.py
     networks:
       - jadc2
@@ -838,7 +841,10 @@ services:
           --conf spark.hadoop.hive.metastore.uris=thrift://hms:9083 \
           --conf spark.cores.max=2 \
           --conf spark.executor.memory=1500m \
-          --conf spark.openmetadata.identity.authorization.token="$OM_JWT_TOKEN" \
+          --conf spark.extraListeners=io.openlineage.spark.agent.OpenLineageSparkListener \
+          --conf spark.openmetadata.transport.hostPort=http://openmetadata-server:8585/api \
+          --conf spark.openmetadata.transport.type=openmetadata \
+          --conf spark.openmetadata.transport.jwtToken="$OM_JWT_TOKEN" \
           /opt/spark/jobs/job2_demo.py
     networks:
       - jadc2
