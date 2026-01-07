@@ -26,9 +26,7 @@ RUN wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/spark/spa
     wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar && \
     wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/spark/spark-token-provider-kafka-0-10_2.12/3.4.1/spark-token-provider-kafka-0-10_2.12-3.4.1.jar
 
-# 3. [NEW] Pre-download Hive & Derby Libraries
-# This prevents the runtime download loop and "FileNotFound" crashes.
-# Based on Spark 3.4.1 compatibility (Hive 2.3.9, Derby 10.14)
+# 3. Pre-download Hive & Derby Libraries
 RUN wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/hive/hive-exec/2.3.9/hive-exec-2.3.9.jar && \
     wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/hive/hive-metastore/2.3.9/hive-metastore-2.3.9.jar && \
     wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/hive/hive-common/2.3.9/hive-common-2.3.9.jar && \
@@ -36,8 +34,9 @@ RUN wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/hive/hive
     wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/apache/derby/derby/10.14.2.0/derby-10.14.2.0.jar && \
     wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/com/google/guava/guava/14.0.1/guava-14.0.1.jar
 
-# 4. OpenMetadata Agent
-RUN wget -P $SPARK_HOME/jars https://repo1.maven.org/maven2/org/open-metadata/openmetadata-spark-agent/1.0-beta/openmetadata-spark-agent-1.0-beta.jar
+# 4. OpenMetadata Spark Agent - USE THE CORRECT URL
+RUN wget -O $SPARK_HOME/jars/openmetadata-spark-agent.jar \
+    https://github.com/open-metadata/openmetadata-spark-agent/releases/download/1.0/openmetadata-spark-agent.jar
 
 # 5. Install Python dependencies
 RUN pip install --no-cache-dir \
@@ -55,8 +54,7 @@ COPY conf/hive-site.xml $SPARK_HOME/conf/hive-site.xml
 COPY scripts/get_om_token.sh /opt/scripts/
 RUN chmod +x /opt/scripts/get_om_token.sh
 
-# 8. [CRITICAL] Fix Permissions & Create Home Directory
-# Creates the /home/spark directory structure and gives 'spark' user ownership.
+# 8. Fix Permissions & Create Home Directory
 RUN mkdir -p /home/spark/.ivy2/cache /home/spark/.ivy2/jars && \
     chown -R spark:spark /home/spark && \
     chown -R spark:spark $SPARK_HOME/jars /opt/scripts
@@ -66,7 +64,6 @@ EXPOSE 4040 7077 8080 8081
 
 # 10. Set Working Directory & User
 WORKDIR /opt/spark/work-dir
-# Ensure Java knows where the user home is
 ENV HOME=/home/spark 
 USER spark
 

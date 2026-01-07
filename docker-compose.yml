@@ -784,9 +784,13 @@ services:
           --conf spark.cores.max=2 \
           --conf spark.executor.memory=1500m \
           --conf spark.extraListeners=io.openlineage.spark.agent.OpenLineageSparkListener \
-          --conf spark.openmetadata.transport.hostPort=http://openmetadata-server:8585/api \
           --conf spark.openmetadata.transport.type=openmetadata \
-          --conf spark.openmetadata.transport.jwtToken="$OM_JWT_TOKEN" \
+          --conf spark.openmetadata.transport.hostPort=http://openmetadata-server:8585/api \
+          --conf spark.openmetadata.transport.jwtToken="${OM_JWT_TOKEN}" \
+          --conf spark.openmetadata.transport.pipelineServiceName=jadc2_spark_pipeline \
+          --conf spark.openmetadata.transport.pipelineName=job1_kafka_to_hdfs \
+          --conf spark.openmetadata.transport.pipelineDescription="Ingest data from Kafka to HDFS Delta Lake" \
+          --conf spark.openmetadata.transport.timeout=30 \
           /opt/spark/jobs/job1_demo.py
     networks:
       - jadc2
@@ -842,9 +846,13 @@ services:
           --conf spark.cores.max=2 \
           --conf spark.executor.memory=1500m \
           --conf spark.extraListeners=io.openlineage.spark.agent.OpenLineageSparkListener \
-          --conf spark.openmetadata.transport.hostPort=http://openmetadata-server:8585/api \
           --conf spark.openmetadata.transport.type=openmetadata \
-          --conf spark.openmetadata.transport.jwtToken="$OM_JWT_TOKEN" \
+          --conf spark.openmetadata.transport.hostPort=http://openmetadata-server:8585/api \
+          --conf spark.openmetadata.transport.jwtToken="${OM_JWT_TOKEN}" \
+          --conf spark.openmetadata.transport.pipelineServiceName=jadc2_spark_pipeline \
+          --conf spark.openmetadata.transport.pipelineName=job2_hdfs_to_postgres \
+          --conf spark.openmetadata.transport.pipelineDescription="Process data from HDFS Delta Lake to PostgreSQL" \
+          --conf spark.openmetadata.transport.timeout=30 \
           /opt/spark/jobs/job2_demo.py
     networks:
       - jadc2
