@@ -1,6 +1,6 @@
 version: "3.9"
 # ============================================================================
-# VOLUMES CONFIGURATION (MAPPED TO /drive1)
+# VOLUMES CONFIGURATION (MAPPED TO /storage)
 # ============================================================================
 volumes:
   # 1. Postgres Source
@@ -9,7 +9,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/postgres_source_data
+      device: /storage/docker_volumes/postgres_source_data
 
   # 2. Postgres Dest
   postgres_dest_data:
@@ -17,7 +17,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/postgres_dest_data
+      device: /storage/docker_volumes/postgres_dest_data
 
   # 3. Kafka
   kafka_data:
@@ -25,7 +25,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/kafka_data
+      device: /storage/docker_volumes/kafka_data
 
   # 4. HDFS Namenode
   namenode_data:
@@ -33,7 +33,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/namenode_data
+      device: /storage/docker_volumes/namenode_data
 
   # 5. HDFS Datanode
   datanode_data:
@@ -41,7 +41,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/datanode_data
+      device: /storage/docker_volumes/datanode_data
 
   # 6. Hive Metastore DB
   hms_data:
@@ -49,7 +49,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/hms_data
+      device: /storage/docker_volumes/hms_data
 
   # 7. OpenMetadata - Ingestion Airflow Config
   ingestion-volume-dag-airflow:
@@ -57,7 +57,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/ingestion-volume-dag-airflow
+      device: /storage/docker_volumes/ingestion-volume-dag-airflow
 
   # 8. OpenMetadata - Ingestion DAGs
   ingestion-volume-dags:
@@ -65,7 +65,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/ingestion-volume-dags
+      device: /storage/docker_volumes/ingestion-volume-dags
 
   # 9. OpenMetadata - Ingestion Tmp
   ingestion-volume-tmp:
@@ -73,7 +73,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/ingestion-volume-tmp
+      device: /storage/docker_volumes/ingestion-volume-tmp
 
   # 10. OpenMetadata - Elasticsearch
   es-data:
@@ -81,7 +81,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/es-data
+      device: /storage/docker_volumes/es-data
 
   # 11. OpenMetadata - MySQL
   openmetadata-mysql-data:
@@ -89,7 +89,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /drive1/docker_volumes/openmetadata-mysql-data
+      device: /storage/docker_volumes/openmetadata-mysql-data
 
 # ============================================================================
 # NETWORKS
